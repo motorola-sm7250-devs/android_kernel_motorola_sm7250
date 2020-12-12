@@ -305,8 +305,6 @@ static void ssusb_redriver_gen_dev_set(
 		"successfully (%s) the redriver chip, reg 0x00 = 0x%x\n",
 		on ? "ENABLE":"DISABLE", val);
 
-	redriver->gen_dev_val = val;
-
 	if (redriver->is_set_aux) {
 		ret = redriver_i2c_reg_set(redriver, AUX_SWITCH_REG, aux_val);
 		if (ret < 0) {
