@@ -1138,7 +1138,7 @@ static ssize_t tzdbgfs_read_unencrypted(struct file *file, char __user *buf,
 	size_t count, loff_t *offp)
 {
 	int len = 0;
-#ifdef DEBUG_DEBUG_FS
+#ifdef CONFIG_DEBUG_FS
 	int tz_id = *(int *)(file->private_data);
 #else
     int tz_id = *(int *)((struct seq_file *)file->private_data)->private;
