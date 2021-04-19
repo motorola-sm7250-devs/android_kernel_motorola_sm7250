@@ -948,6 +948,8 @@ static int ufs_qcom_full_reset(struct ufs_hba *hba)
 		dev_err(hba->dev, "%s: core_reset deassert failed, err = %d\n",
 				__func__, ret);
 
+	usleep_range(1000, 1100);
+
 	if (reenable_intr) {
 		enable_irq(hba->irq);
 		hba->is_irq_enabled = true;
