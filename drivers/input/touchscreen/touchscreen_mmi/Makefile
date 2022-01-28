@@ -1,14 +1,23 @@
-all: modules
+ifneq ($(filter m y, $(CONFIG_PANEL_NOTIFICATIONS)),)
+	ccflags-y += -DCONFIG_PANEL_NOTIFICATIONS
+endif
 
-modules:
-	$(MAKE) -C $(KERNEL_SRC) M=$(M) modules $(KBUILD_OPTIONS)
+ifneq ($(filter m y, $(CONFIG_DRM_DYNAMIC_REFRESH_RATE)),)
+	ccflags -y += -DCONFIG_DRM_DYNAMIC_REFRESH_RATE
+endif
 
-modules_install:
-	$(MAKE) INSTALL_MOD_STRIP=1 -C $(KERNEL_SRC) M=$(M) modules_install
+ifneq ($(filter m y, $(CONFIG_TOUCHCLASS_MMI_DEBUG_INFO)),)
+	ccflags-y += -DCONFIG_TOUCHCLASS_MMI_DEBUG_INFO
+endif
 
-%:
-	$(MAKE) -C $(KERNEL_SRC) M=$(M) $@ $(KBUILD_OPTIONS)
+ifneq ($(filter m y, $(CONFIG_TOUCHCLASS_MMI_GESTURE_POISON_EVENT)),)
+	ccflags-y += -DTS_MMI_TOUCH_GESTURE_POISON_EVENT
+endif
 
-KBUILD_EXTRA_SYMBOLS += $(M)/../../../sensors/Module.symvers
-KBUILD_EXTRA_SYMBOLS += $(M)/../../../mmi_relay/Module.symvers
-KBUILD_EXTRA_SYMBOLS += $(OUT_DIR)/../../vendor/qcom/opensource/display-drivers/msm/Module.symvers
+ifneq ($(filter m y, $(CONFIG_DRM_PANEL_NOTIFICATIONS)),)
+	ccflags-y += -DCONFIG_DRM_PANEL_NOTIFICATIONS
+endif
+
+touchscreen_mmi-y += touchscreen_mmi_class.o touchscreen_mmi_panel.o touchscreen_mmi_notif.o touchscreen_mmi_gesture.o
+
+obj-$(CONFIG_INPUT_TOUCHSCREEN_MMI) += touchscreen_mmi.o
