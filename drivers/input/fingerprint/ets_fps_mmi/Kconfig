@@ -46,3 +46,27 @@ config DISPLAY_SPEED_UP
 	 Say Y here if you wish to include display speed up support for EGIS finger print sensor.
 	 If unsure, say N.
 
+ choice
+	prompt "Egistec fingerprint sensor pose"
+    depends on INPUT_EGISTEC_FPS_NAVI
+	default INPUT_EGISTEC_FPS_POSE_270
+
+	config INPUT_EGISTEC_FPS_POSE_0
+		bool "0 degree"
+
+	config INPUT_EGISTEC_FPS_POSE_90
+		bool "90 degree"
+
+	config INPUT_EGISTEC_FPS_POSE_180
+		bool "180 degree"
+
+	config INPUT_EGISTEC_FPS_POSE_270
+		bool "270 degree"
+endchoice
+
+config INPUT_EGISTEC_FPS_POSE
+	int
+	default 0 if INPUT_EGISTEC_FPS_POSE_0
+	default 90 if INPUT_EGISTEC_FPS_POSE_90
+	default 180 if INPUT_EGISTEC_FPS_POSE_180
+	default 270 if INPUT_EGISTEC_FPS_POSE_270
