@@ -38,7 +38,7 @@ config NAV_DOUBLE_TAP
 	 Say Y here if you wish to include double tap support for EGIS finger print sensor.
 	 If unsure, say Y.
 
-config DISPLAY_SPEED_UP
+config EGIS_DISPLAY_SPEED_UP
 	bool "Egistec fingerprint display speed up"
 	depends on FINGERPRINT_EGISTEC_FPS_MMI
 	default n
