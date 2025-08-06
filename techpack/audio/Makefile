@@ -27,6 +27,10 @@ ifeq ($(CONFIG_ARCH_SDM660), y)
 include $(srctree)/techpack/audio/config/sdm660auto.conf
 export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/sdm660auto.conf)
 endif
+ifneq (,$(filter kiev% nairo%, $(TARGET_PRODUCT)))
+include $(srctree)/techpack/audio/config/litomoto.conf
+export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/litomoto.conf)
+endif
 
 # Use USERINCLUDE when you must reference the UAPI directories only.
 USERINCLUDE     += \
@@ -67,6 +71,11 @@ ifeq ($(CONFIG_ARCH_SDM660), y)
 LINUXINCLUDE    += \
                 -include $(srctree)/techpack/audio/config/sdm660autoconf.h
 endif
+ifneq (,$(filter kiev% nairo% smith%, $(TARGET_PRODUCT)))
+LINUXINCLUDE    += \
+                -include $(srctree)/techpack/audio/config/lito$(TARGET_PRODUCT).h
+endif
+
 obj-y += soc/
 obj-y += dsp/
 obj-y += ipc/
