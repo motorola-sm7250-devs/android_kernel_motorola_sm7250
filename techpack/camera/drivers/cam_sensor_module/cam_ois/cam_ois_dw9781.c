@@ -56,7 +56,7 @@ static int32_t dw9781_cci_write(struct camera_io_master * io_master_info, uint16
 	wr_setting.reg_setting = &reg_setting;
 	wr_setting.size = 1;
 	wr_setting.delay = 0;
-	rc = camera_io_dev_write(io_master_info, &wr_setting, false);
+	rc = camera_io_dev_write(io_master_info, &wr_setting);
 	return rc;
 }
 
@@ -154,6 +154,7 @@ static void dw9781_erase_mtp(struct camera_io_master * io_master_info)
 	dw9781_cci_write(io_master_info, 0xdd03, 0x0002);
 	dw9781_cci_write(io_master_info, 0xdd04, 0x0002);
 
+>>>>>>> 685f0efe89cfc34900eac895c78b60367911b3fc
 	/* 4k Sector_0 Erase*/
 	dw9781_cci_write(io_master_info, 0xde03, 0x0000);
 	dw9781_cci_write(io_master_info, 0xde04, 0x0002);
