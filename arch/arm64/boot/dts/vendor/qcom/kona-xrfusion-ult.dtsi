@@ -993,7 +993,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150b_adc_tm ADC_AMUX_THM3_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -1008,7 +1007,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150_adc_tm ADC_XO_THERM_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -1023,7 +1021,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150_adc_tm ADC_AMUX_THM1_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -1038,7 +1035,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150_adc_tm ADC_AMUX_THM2_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -1053,7 +1049,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150l_adc_tm ADC_AMUX_THM1_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
@@ -1068,15 +1063,8 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150l_adc_tm ADC_AMUX_THM2_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
-				temperature = <125000>;
-				hysteresis = <1000>;
-				type = "passive";
-			};
-
-			active-config1 {
 				temperature = <125000>;
 				hysteresis = <1000>;
 				type = "passive";
@@ -1089,7 +1077,6 @@
 		polling-delay = <0>;
 		thermal-governor = "user_space";
 		thermal-sensors = <&pm8150l_adc_tm ADC_AMUX_THM3_PU2>;
-		wake-capable-sensor;
 		trips {
 			active-config0 {
 				temperature = <125000>;
