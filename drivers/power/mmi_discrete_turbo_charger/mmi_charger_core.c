@@ -815,22 +815,38 @@ bool mmi_is_cable_plugout(struct mmi_charger_manager *chip)
 	return false;
 }
 
-static bool mmi_factory_check(void)
+static bool mmi_factory_check(struct mmi_charger_manager *chip)
 {
 	struct device_node *np = of_find_node_by_path("/chosen");
-	bool factory = false;
+	bool factory_mode = false;
+	const char *bootargs = NULL;
+	char *bootmode = NULL;
+	char *end = NULL;
 
-	if (np)
-		factory = of_property_read_bool(np, "mmi,factory-cable");
+	if (!np)
+		return factory_mode;
 
+	if (!of_property_read_string(np, "bootargs", &bootargs)) {
+		bootmode = strstr(bootargs, "androidboot.mode=");
+		if (bootmode) {
+			end = strpbrk(bootmode, " ");
+			bootmode = strpbrk(bootmode, "=");
+		}
+		if (bootmode &&
+		    end > bootmode &&
+		    strnstr(bootmode, "mot-factory", end - bootmode)) {
+				factory_mode = true;
+		}
+	}
 	of_node_put(np);
 
-	return factory;
+	return factory_mode;
 }
 
 
 static void kick_sm(struct mmi_charger_manager *chip, int ms)
 {
+	struct mmi_cp_policy_dev *chrg_list = &g_chrg_list;
 	int ret;
 
 	if (!chip->sm_work_running) {
@@ -840,6 +856,17 @@ static void kick_sm(struct mmi_charger_manager *chip, int ms)
 		schedule_delayed_work(&chip->mmi_chrg_sm_work,
 				msecs_to_jiffies(ms));
 		chip->sm_work_running = true;
+
+		ret = mmi_charger_write_iio_chan(chip, CP_STATUS1, MMI_ENABLE_ADC);
+		if (ret)
+			mmi_chrg_err(chip, "Unable to write master CP adc enable status: %d\n", ret);
+
+		if (chrg_list->cp_slave) {
+			ret = mmi_charger_write_iio_chan(chip, CP_SLAVE_STATUS1, MMI_ENABLE_ADC);
+			if (ret)
+				mmi_chrg_err(chip, "Unable to write slave CP adc enable status: %d\n", ret);
+		}
+
 		ret = mmi_charger_write_iio_chan(chip, MMI_CP_ENABLE_STATUS, true);
 		if (ret)
 			mmi_chrg_err(chip, "Unable to write CP enable status: %d\n", ret);
@@ -850,12 +877,26 @@ static void kick_sm(struct mmi_charger_manager *chip, int ms)
 
 static void cancel_sm(struct mmi_charger_manager *chip)
 {
+	struct mmi_cp_policy_dev *chrg_list = &g_chrg_list;
+	int ret;
+
 	cancel_delayed_work_sync(&chip->mmi_chrg_sm_work);
 	flush_delayed_work(&chip->mmi_chrg_sm_work);
 	mmi_chrg_policy_clear(chip);
 	chip->sm_work_running = false;
 	chip->pd_volt_max = pd_volt_max_init;
 	chip->pd_curr_max = pd_curr_max_init;
+
+	ret = mmi_charger_write_iio_chan(chip, CP_STATUS1, chip->factory_mode? MMI_ENABLE_ADC : MMI_DISABLE_ADC);
+	if (ret)
+		mmi_chrg_err(chip, "Unable to write master CP adc disable status: %d\n", ret);
+
+	if (chrg_list->cp_slave) {
+		ret = mmi_charger_write_iio_chan(chip, CP_SLAVE_STATUS1, chip->factory_mode? MMI_ENABLE_ADC : MMI_DISABLE_ADC);
+		if (ret)
+			mmi_chrg_err(chip, "Unable to write slave CP adc disable status: %d\n", ret);
+	}
+
 	mmi_chrg_dbg(chip, PR_INTERRUPT,
 					"cancel sync and flush mmi chrg sm work\n");
 }
@@ -910,7 +951,8 @@ void clear_chrg_dev_error_cnt(struct mmi_charger_manager *chip, struct mmi_cp_po
 
 static void kick_qc3p_sm(struct mmi_charger_manager *chip, int ms)
 {
-
+	struct mmi_cp_policy_dev *chrg_list = &g_chrg_list;
+	int ret;
 
 	if (!chip->qc3p_sm_work_running) {
 		mmi_chrg_dbg(chip, PR_INTERRUPT,
@@ -919,6 +961,16 @@ static void kick_qc3p_sm(struct mmi_charger_manager *chip, int ms)
 		schedule_delayed_work(&chip->mmi_qc3p_chrg_sm_work, //
 				msecs_to_jiffies(ms)); //todo
 		chip->qc3p_sm_work_running = true;
+
+		ret = mmi_charger_write_iio_chan(chip, CP_STATUS1, MMI_ENABLE_ADC);
+		if (ret)
+			mmi_chrg_err(chip, "Unable to write master CP adc enable status: %d\n", ret);
+
+		if (chrg_list->cp_slave) {
+			ret = mmi_charger_write_iio_chan(chip, CP_SLAVE_STATUS1, MMI_ENABLE_ADC);
+			if (ret)
+				mmi_chrg_err(chip, "Unable to write slave CP adc enable status: %d\n", ret);
+		}
 	} else
 		mmi_chrg_dbg(chip, PR_INTERRUPT,
 					"mmi chrg qc3p sm work already existed\n");
@@ -926,6 +978,7 @@ static void kick_qc3p_sm(struct mmi_charger_manager *chip, int ms)
 
 static void cancel_qc3p_sm(struct mmi_charger_manager *chip)
 {
+	struct mmi_cp_policy_dev *chrg_list = &g_chrg_list;
 	int ret;
 
 	cancel_delayed_work_sync(&chip->mmi_qc3p_chrg_sm_work);
@@ -936,6 +989,17 @@ static void cancel_qc3p_sm(struct mmi_charger_manager *chip)
 	if (ret)
 		mmi_chrg_err(chip, "Unable to write CP disable status: %d\n", ret);
 	chip->qc3p_volt_max = qc3p_volt_max_init;
+
+	ret = mmi_charger_write_iio_chan(chip, CP_STATUS1, chip->factory_mode? MMI_ENABLE_ADC : MMI_DISABLE_ADC);
+	if (ret)
+		mmi_chrg_err(chip, "Unable to write master CP adc disable status: %d\n", ret);
+
+	if (chrg_list->cp_slave) {
+		ret = mmi_charger_write_iio_chan(chip, CP_SLAVE_STATUS1, chip->factory_mode? MMI_ENABLE_ADC : MMI_DISABLE_ADC);
+		if (ret)
+			mmi_chrg_err(chip, "Unable to write slave CP adc disable status: %d\n", ret);
+	}
+
 	mmi_chrg_dbg(chip, PR_INTERRUPT,
 					"cancel sync and flush mmi chrg qc3p sm work\n");
 }
@@ -959,6 +1023,8 @@ int mmi_charger_update_pd_capacity(struct mmi_charger_manager *chip)
 	int ret = 0, i = 0;
 	int maxwatt = 0, max_mv = 0, max_ma = 0;
 
+	chip->pd_pps_support = false;
+	chip->mmi_pd_pdo_idx = 0;
 	ret = mmi_charger_read_iio_chan(chip, SMB5_USB_PD_ACTIVE, &val.intval);
 	if (ret) {
 		mmi_chrg_err(chip, "Unable to read PD ACTIVE: %d\n", ret);
@@ -988,10 +1054,13 @@ int mmi_charger_update_pd_capacity(struct mmi_charger_manager *chip)
 		for (i = 0; i < chip->mmi_pdo_info.nr; i++) {
 			if ((chip->mmi_pdo_info.type[i] == MMI_PD_APDO)
 				&& (chip->mmi_pdo_info.max_mv[i] * 1000) >= PUMP_CHARGER_PPS_MIN_VOLT
-				&& (chip->mmi_pdo_info.max_mv[i] * 1000) <= PUMP_CHARGER_PPS_MAX_VOLT
 				&& (chip->mmi_pdo_info.ma[i] * 1000) >= chip->typec_middle_current) {
 
 					chip->pd_pps_support = true;
+					if ((chip->mmi_pdo_info.max_mv[i] * 1000) > PUMP_CHARGER_PPS_MAX_VOLT) {
+						chip->mmi_pdo_info.max_mv[i] = PUMP_CHARGER_PPS_MAX_VOLT / 1000;
+						chip->mmi_pdo_info.maxwatt[i] = chip->mmi_pdo_info.ma[i] * chip->mmi_pdo_info.max_mv[i];
+					}
 
 					if (maxwatt == 0) {
 						maxwatt = chip->mmi_pdo_info.maxwatt[i];
@@ -1019,13 +1088,9 @@ int mmi_charger_update_pd_capacity(struct mmi_charger_manager *chip)
 			chip->mmi_pd_pdo_idx,
 			chip->mmi_pdo_info.max_mv[chip->mmi_pd_pdo_idx],
 			chip->mmi_pdo_info.ma[chip->mmi_pd_pdo_idx]);
-		if ((max_mv * 1000) <= pd_volt_max_init) {
-			chip->pd_volt_max = max_mv * 1000;
-		}
 
-		if ((max_ma * 1000) <= pd_curr_max_init) {
-			chip->pd_curr_max = max_ma * 1000;
-		}
+		chip->pd_volt_max = min((max_mv * 1000), pd_volt_max_init);
+		chip->pd_curr_max = min((max_ma * 1000), pd_curr_max_init);
 
 	}
 
@@ -1645,7 +1710,7 @@ static int mmi_chrg_manager_probe(struct platform_device *pdev)
 		goto cleanup;
 	}
 
-	chip->factory_mode = mmi_factory_check();
+	chip->factory_mode = mmi_factory_check(chip);
 
 
 

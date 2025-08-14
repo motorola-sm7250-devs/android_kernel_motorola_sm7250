@@ -59,6 +59,9 @@
 #if defined(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8726)
 #define FTS_CHIP_TYPE_MAPPING {{0x1C, 0x87, 0x20, 0x87, 0x20, 0x87, 0xA0, 0x00, 0x00}}
 #define FTS_CHIP_ID_MAPPING {{0x1C, {0x8726, 0x872A, 0x872B}}}
+#elif defined(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8057)
+#define FTS_CHIP_TYPE_MAPPING {{0x28, 0x80, 0x57, 0x80, 0x57, 0x80, 0xA7, 0x00, 0x00}}
+#define FTS_CHIP_ID_MAPPING {{0x1C, {0x8726, 0x872A, 0x872B}}}
 #else
 #define FTS_CHIP_TYPE_MAPPING {{0x1C, 0x87, 0x20, 0x87, 0x20, 0x87, 0xA0, 0x00, 0x00}}
 #define FTS_CHIP_ID_MAPPING {{0x1C, {0x8726, 0x872A, 0x872B}}}
@@ -151,6 +154,8 @@ struct ts_ic_info {
     struct ft_chip_id_t cid;
 };
 
+extern bool dbg_level_en;
+
 /*****************************************************************************
 * DEBUG function define here
 *****************************************************************************/
@@ -179,6 +184,11 @@ struct ts_ic_info {
     pr_debug("[FTS_TS]%s: Exit(%d)\n", __func__, __LINE__); \
 } while (0)
 #endif
+
+#define FTS_DBG_LEVEL(fmt, args...) do { \
+    if (dbg_level_en) \
+       printk("[FTS_TS/D]%s:"fmt"\n", __func__, ##args); \
+} while (0)
 
 #define FTS_INFO(fmt, args...) do { \
     printk(KERN_INFO "[FTS_TS/I]%s:"fmt"\n", __func__, ##args); \

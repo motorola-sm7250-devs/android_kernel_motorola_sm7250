@@ -12,7 +12,6 @@
  */
 
 #include "goodix_ts_mmi.h"
-#include "goodix_ts_core.h"
 #include <linux/delay.h>
 #include <linux/input/mt.h>
 #include "goodix_ts_config.h"
@@ -52,6 +51,13 @@ static ssize_t goodix_ts_sensitivity_store(struct device *dev,
 static ssize_t goodix_ts_timestamp_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
 #endif
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+static ssize_t goodix_ts_log_trigger_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count);
+static ssize_t goodix_ts_log_trigger_show(struct device *dev,
+		struct device_attribute *attr, char *buf);
+#endif
 
 static DEVICE_ATTR(edge, (S_IRUGO | S_IWUSR | S_IWGRP),
 	goodix_ts_edge_show, goodix_ts_edge_store);
@@ -66,6 +72,10 @@ static DEVICE_ATTR(sensitivity, (S_IRUGO | S_IWUSR | S_IWGRP),
 #ifdef CONFIG_GTP_LAST_TIME
 static DEVICE_ATTR(timestamp, S_IRUGO, goodix_ts_timestamp_show, NULL);
 #endif
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+static DEVICE_ATTR(log_trigger, (S_IRUGO | S_IWUSR | S_IWGRP),
+	goodix_ts_log_trigger_show, goodix_ts_log_trigger_store);
+#endif
 
 /* hal settings */
 #define ROTATE_0   0
@@ -76,6 +86,10 @@ static DEVICE_ATTR(timestamp, S_IRUGO, goodix_ts_timestamp_show, NULL);
 #define SMALL_MODE    2
 #define DEFAULT_MODE   0
 #define MAX_ATTRS_ENTRIES 10
+
+#define NORMAL_DEFAULT_MODE 10
+#define NORMAL_SMALL_MODE 11
+#define NORMAL_BIG_MODE 12
 
 #define ADD_ATTR(name) { \
 	if (idx < MAX_ATTRS_ENTRIES)  { \
@@ -119,6 +133,10 @@ static int goodix_ts_mmi_extend_attribute_group(struct device *dev, struct attri
 	ADD_ATTR(timestamp);
 #endif
 
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+	ADD_ATTR(log_trigger);
+#endif
+
 	if (idx) {
 		ext_attributes[idx] = NULL;
 		*group = &ext_attr_group;
@@ -128,7 +146,7 @@ static int goodix_ts_mmi_extend_attribute_group(struct device *dev, struct attri
 	return 0;
 }
 
-static int goodix_ts_send_cmd(struct goodix_ts_core *core_data,
+int goodix_ts_send_cmd(struct goodix_ts_core *core_data,
 		u8 cmd, u8 len, u8 subCmd, u8 subCmd2)
 {
 	int ret = 0;
@@ -351,11 +369,9 @@ static ssize_t goodix_ts_stylus_mode_store(struct device *dev,
 	unsigned long mode = 0;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	dev = MMI_DEV_TO_TS_DEV(dev);
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	ret = kstrtoul(buf, 0, &mode);
 	if (ret < 0) {
@@ -460,11 +476,9 @@ static ssize_t goodix_ts_interpolation_store(struct device *dev,
 	unsigned long mode = 0;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	dev = MMI_DEV_TO_TS_DEV(dev);
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	ret = kstrtoul(buf, 0, &mode);
 	if (ret < 0) {
@@ -505,11 +519,9 @@ static ssize_t goodix_ts_sample_store(struct device *dev,
 	unsigned long mode = 0;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	dev = MMI_DEV_TO_TS_DEV(dev);
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	ret = kstrtoul(buf, 0, &mode);
 	if (ret < 0) {
@@ -590,23 +602,34 @@ static ssize_t goodix_ts_edge_store(struct device *dev,
 	unsigned int args[2] = { 0 };
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	dev = MMI_DEV_TO_TS_DEV(dev);
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	ret = sscanf(buf, "%d %d", &args[0], &args[1]);
 	if (ret < 2)
 		return -EINVAL;
 
-	if (DEFAULT_MODE == args[0]) {
+	switch (args[0]) {
+	case DEFAULT_MODE:
 		edge_cmd[1] = DEFAULT_EDGE;
-	} else if (SMALL_MODE == args[0]) {
+		break;
+	case SMALL_MODE:
 		edge_cmd[1] = SMALL_EDGE;
-	} else if (BIG_MODE == args[0]) {
+		break;
+	case BIG_MODE:
 		edge_cmd[1] = BIG_EDGE;
-	} else {
+		break;
+	case NORMAL_DEFAULT_MODE:
+		edge_cmd[1] = NORMAL_DEFAULT_EDGE;
+		break;
+	case NORMAL_SMALL_MODE:
+		edge_cmd[1] = NORMAL_SMALL_EDGE;
+		break;
+	case NORMAL_BIG_MODE:
+		edge_cmd[1] = NORMAL_BIG_EDGE;
+		break;
+	default:
 		ts_err("Invalid edge mode: %d!\n", args[0]);
 		return -EINVAL;
 	}
@@ -687,6 +710,39 @@ static ssize_t goodix_ts_timestamp_show(struct device *dev,
 	last_ts = ktime_to_timespec64(last_ktime);
 
 	return scnprintf(buf, PAGE_SIZE, "%lld.%ld\n", last_ts.tv_sec, last_ts.tv_nsec);
+}
+#endif
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+static ssize_t goodix_ts_log_trigger_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct platform_device *pdev;
+	struct goodix_ts_core *core_data;
+
+	dev = MMI_DEV_TO_TS_DEV(dev);
+	GET_GOODIX_DATA(dev);
+
+	if (!buf || count <= 0)
+		return 0;
+
+	clear_kfifo();
+	frame_log_capture_start(core_data);
+
+	return count;
+}
+
+static ssize_t goodix_ts_log_trigger_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct platform_device *pdev;
+	struct goodix_ts_core *core_data;
+
+	dev = MMI_DEV_TO_TS_DEV(dev);
+	GET_GOODIX_DATA(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "0x%02x", 0x01);
 }
 #endif
 
@@ -884,15 +940,12 @@ static int goodix_ts_mmi_charger_mode(struct device *dev, int mode)
 	int timeout = 50;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	GET_GOODIX_DATA(dev);
 
 	/* 5000ms timeout */
 	while (core_data->init_stage < CORE_INIT_STAGE2 && timeout--)
 		msleep(100);
-
-	hw_ops = core_data->hw_ops;
 
 	mutex_lock(&core_data->mode_lock);
 	ret = goodix_ts_send_cmd(core_data, CHARGER_MODE_CMD, 5, mode, 0x00);
@@ -902,6 +955,84 @@ static int goodix_ts_mmi_charger_mode(struct device *dev, int mode)
 	msleep(20);
 	ts_err("Success to %s charger mode\n", mode ? "Enable" : "Disable");
 	mutex_unlock(&core_data->mode_lock);
+
+	return 0;
+}
+
+#if defined(CONFIG_BOARD_USES_DOUBLE_TAP_CTRL)
+static unsigned int set_bit_in_pos(unsigned int val, int bit_pos)
+{
+	return val |= (1 << bit_pos);
+}
+
+static unsigned int clear_bit_in_pos(unsigned int val, int bit_pos)
+{
+	return val &= ~(1 << bit_pos);
+}
+#endif
+
+static int goodix_berlin_gesture_setup(struct goodix_ts_core *core_data)
+{
+	const struct goodix_ts_hw_ops *hw_ops = core_data->hw_ops;
+	unsigned int gesture_cmd = 0;
+#if defined(CONFIG_BOARD_USES_DOUBLE_TAP_CTRL)
+	int ret = 0;
+	unsigned char gesture_type = 0;
+	unsigned int (*mod_func)(unsigned int, int) = set_bit_in_pos;
+
+	/* Goodix provided definitive description of gesture mode setting
+		for 9916 and 9966 touch ICs. It's safer to fail for any others
+		until it's confirmed!!!
+	*/
+	if (core_data->bus->ic_type != IC_TYPE_BERLIN_B &&
+		core_data->bus->ic_type != IC_TYPE_BERLIN_D) {
+		ts_err("GT%s gestures not set\n", core_data->fw_version.patch_pid);
+		return -EINVAL;
+	}
+
+	if (core_data->imports && core_data->imports->get_gesture_type) {
+		ret = core_data->imports->get_gesture_type(core_data->bus->dev, &gesture_type);
+		ts_info("Provisioned gestures 0x%02x; rc = %d\n", gesture_type, ret);
+	}
+	if (core_data->bus->ic_type == IC_TYPE_BERLIN_D) {
+		gesture_cmd = 0xFFFF;
+		mod_func = clear_bit_in_pos;
+	}
+	if (gesture_type & TS_MMI_GESTURE_ZERO) {
+		gesture_cmd = mod_func(gesture_cmd, 13);
+		ts_info("enable zero gesture mode cmd 0x%04x\n", gesture_cmd);
+	}
+	if (gesture_type & TS_MMI_GESTURE_SINGLE) {
+		gesture_cmd = mod_func(gesture_cmd, 12);
+		ts_info("enable single gesture mode cmd 0x%04x\n", gesture_cmd);
+	}
+	if (gesture_type & TS_MMI_GESTURE_DOUBLE) {
+		gesture_cmd = mod_func(gesture_cmd, 7);
+		ts_info("enable double gesture mode cmd 0x%04x\n", gesture_cmd);
+	}
+#ifdef GOODIX_PALM_SENSOR_EN
+	if (gesture_type & TS_MMI_GESTURE_PALM) {
+		/* override previous setting */
+		gesture_cmd = 0xFFFF;
+		ts_info("enable palm gesture mode cmd 0x%04x\n", gesture_cmd);
+	}
+#endif
+	core_data->gesture_cmd = gesture_cmd;
+	if (core_data->bus->ic_type == IC_TYPE_BERLIN_D) {
+		/* TODO Is this really necessary??? */
+		ret = goodix_ts_send_cmd(core_data, ENTER_GESTURE_MODE_CMD, 6, 0xFF, 0xFF);
+		if (ret < 0) {
+			ts_err("Failed to send enter gesture mode\n");
+		}
+	}
+#else
+#if defined(PRODUCT_MIAMI)
+	/* TODO Check if Miami 9916??? */
+	gesture_cmd = 0x80;
+#endif
+#endif
+	hw_ops->gesture(core_data, gesture_cmd);
+	ts_info("Send enable gesture mode 0x%x\n", gesture_cmd);
 
 	return 0;
 }
@@ -919,12 +1050,13 @@ static int goodix_ts_mmi_panel_state(struct device *dev,
 	switch (to) {
 	case TS_MMI_PM_GESTURE:
 		hw_ops->irq_enable(core_data, false);
-		if (hw_ops->gesture)
-			hw_ops->gesture(core_data, 0);
-		msleep(16);
-		hw_ops->irq_enable(core_data, true);
-		enable_irq_wake(core_data->irq);
-		core_data->gesture_enabled = true;
+		if (hw_ops->gesture) {
+			goodix_berlin_gesture_setup(core_data);
+			msleep(16);
+			hw_ops->irq_enable(core_data, true);
+			enable_irq_wake(core_data->irq);
+			core_data->gesture_enabled = true;
+		}
 		break;
 	case TS_MMI_PM_DEEPSLEEP:
 		/* enter sleep mode or power off */
@@ -952,11 +1084,9 @@ static int goodix_ts_mmi_panel_state(struct device *dev,
 static int goodix_ts_mmi_pre_resume(struct device *dev) {
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	ts_info("Resume start");
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	atomic_set(&core_data->suspended, 0);
 	if (core_data->gesture_enabled) {
@@ -971,10 +1101,8 @@ static int goodix_ts_mmi_post_resume(struct device *dev) {
 	int ret = 0;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	/* open esd */
 	goodix_ts_blocking_notify(NOTIFY_RESUME, NULL);
@@ -1051,6 +1179,27 @@ static int goodix_ts_mmi_post_resume(struct device *dev) {
 				core_data->get_mode.edge_mode[1], core_data->get_mode.edge_mode[0]);
 		}
 	}
+	if (core_data->get_mode.liquid_detection) {
+		ret = goodix_ts_send_cmd(core_data, LIQUID_DETECTION_SWITCH_CMD, 5,
+						core_data->get_mode.liquid_detection, 0x00);
+		if (!ret) {
+			core_data->set_mode.liquid_detection = core_data->get_mode.liquid_detection;
+			msleep(20);
+			ts_info("Success to %d liquid detection mode\n", core_data->get_mode.liquid_detection);
+		}
+	}
+
+#ifdef GOODIX_PALM_SENSOR_EN
+	if (core_data->get_mode.palm_detection) {
+		ret = goodix_ts_send_cmd(core_data, PALM_DETECTION_SWITCH_CMD, 5,
+						core_data->get_mode.palm_detection, 0x00);
+		if (!ret) {
+			core_data->set_mode.palm_detection = core_data->get_mode.palm_detection;
+			msleep(20);
+			ts_info("Success to %d palm detection mode\n", core_data->get_mode.palm_detection);
+		}
+	}
+#endif
 	mutex_unlock(&core_data->mode_lock);
 #ifdef CONFIG_GTP_FOD
 	if(core_data->zerotap_data[0]) {
@@ -1065,13 +1214,17 @@ static int goodix_ts_mmi_pre_suspend(struct device *dev) {
 	int ret = 0;
 	struct platform_device *pdev;
 	struct goodix_ts_core *core_data;
-	const struct goodix_ts_hw_ops *hw_ops;
 
 	GET_GOODIX_DATA(dev);
-	hw_ops = core_data->hw_ops;
 
 	ts_info("Suspend start");
 	atomic_set(&core_data->suspended, 1);
+
+#ifdef GOODIX_PALM_SENSOR_EN
+	if (core_data->set_mode.palm_detection) {
+		del_timer(&core_data->palm_release_timer);
+	}
+#endif
 
 	if (core_data->board_data.stylus_mode_ctrl && core_data->set_mode.stylus_mode) {
 		mutex_lock(&core_data->mode_lock);
@@ -1117,17 +1270,89 @@ static int goodix_ts_mmi_update_fps_mode(struct device *dev, int mode) {
 }
 #endif
 
+static int goodix_ts_mmi_update_liquid_detect_mode(struct device *dev, int mode) {
+	int ret = 0;
+	struct platform_device *pdev;
+	struct goodix_ts_core *core_data;
+
+	GET_GOODIX_DATA(dev);
+
+	mutex_lock(&core_data->mode_lock);
+	core_data->get_mode.liquid_detection= mode;
+	if (core_data->set_mode.liquid_detection == mode) {
+		ts_debug("The value = %d is same, so not to write", mode);
+		goto exit;
+	}
+
+	if (core_data->power_on == 0) {
+		ts_debug("The touch is in sleep state, restore the value when resume\n");
+		goto exit;
+	}
+
+	//clear liquid status before enable detection
+	if (mode)
+		core_data->liquid_status = 0;
+
+	ret = goodix_ts_send_cmd(core_data, LIQUID_DETECTION_SWITCH_CMD, 5,
+						core_data->get_mode.liquid_detection, 0x00);
+	if (ret < 0) {
+		ts_err("failed to set liquid detection, mode = %d", mode);
+		goto exit;
+	}
+
+	core_data->set_mode.liquid_detection = mode;
+	msleep(20);
+	ts_info("Success to set %d\n", mode);
+
+exit:
+	mutex_unlock(&core_data->mode_lock);
+	return ret;
+}
+
+#define Y_MIN_ID 2
+#define Y_MAX_ID 3
+#define SCREEN_X_MAX 1080
+#define SCREEN_Y_MAX 2992
+#define SCREEN_EXTENDED 2600
+#define SCREEN_PRIM_COMPACT 1980
+#define DISP_MODE_REAR 3
+#define DISP_MODE_FULL 4
+#define DISP_MODE_EXTENDED 0
+#define DISP_MODE_PRIM_COMPACT 1
+#define DISP_MODE_PRIM_PEEK 2
+
 static int rdArray[4];
 
 static int goodix_ts_mmi_active_region(struct device *dev, int *reg_data)
 {
 	struct goodix_ts_core *core_data;
 	struct platform_device *pdev;
+	int ret, dmode = -1;
 
 	GET_GOODIX_DATA(dev);
 
 	memcpy(rdArray, reg_data, sizeof(rdArray));
-	ts_info("set active region: %d %d %d %d\n", rdArray[0], rdArray[1], rdArray[2], rdArray[3]);
+	if (rdArray[Y_MIN_ID] > 0) { /* REAR */
+		dmode = DISP_MODE_REAR; /* Mode4 */
+	} else { /* FULL or PRIMARY */
+		if (rdArray[Y_MAX_ID] == SCREEN_Y_MAX)
+			dmode = DISP_MODE_FULL; /* Mode5 */
+		else if (rdArray[Y_MAX_ID] > SCREEN_EXTENDED)
+			dmode = DISP_MODE_EXTENDED; /* Mode1 */
+		else if (rdArray[Y_MAX_ID] > SCREEN_PRIM_COMPACT)
+			dmode = DISP_MODE_PRIM_COMPACT; /* Mode2 */
+		else
+			dmode = DISP_MODE_PRIM_PEEK; /* Mode3 */
+	}
+	if (dmode >= 0 ) {
+		ret = core_data->hw_ops->display_mode(core_data, dmode);
+		if (!ret)
+			ts_info("set active region: %d %d %d %d; dmode=%d\n",
+				rdArray[0], rdArray[1], rdArray[Y_MIN_ID], rdArray[Y_MAX_ID], dmode);
+	} else
+		dev_err(&pdev->dev, "Invalid display mode; reqion %d %d %d %d\n",
+			rdArray[0], rdArray[1], rdArray[Y_MIN_ID], rdArray[Y_MAX_ID]);
+
 	return 0;
 }
 
@@ -1139,8 +1364,57 @@ static int goodix_ts_mmi_methods_get_active_region(struct device *dev, void *uid
 	GET_GOODIX_DATA(dev);
 
 	memcpy((int *)uidata, rdArray, sizeof(rdArray));
-        return 0;
+	return 0;
 }
+
+#ifdef GOODIX_PALM_SENSOR_EN
+int goodix_ts_mmi_palm_set_enable(struct device *dev, unsigned int enable)
+{
+	int ret = 0;
+	struct platform_device *pdev;
+	struct goodix_ts_core *core_data;
+
+	GET_GOODIX_DATA(dev);
+
+	mutex_lock(&core_data->mode_lock);
+	core_data->get_mode.palm_detection= enable;
+	if (core_data->set_mode.palm_detection == enable) {
+		ts_info("The value = %d is same, so not to write", enable);
+		goto exit;
+	}
+
+	if (core_data->power_on == 0) {
+		ts_info("The touch is in sleep state, restore the value when resume\n");
+		goto exit;
+	}
+
+	//clear palm status before enable detection
+	if (enable)
+		atomic_set(&core_data->palm_status, 0);
+	else {
+		if (core_data->imports && core_data->imports->report_palm) {
+			core_data->imports->report_palm(0);
+			ts_info("Disable palm detection, report far\n");
+		}
+		del_timer(&core_data->palm_release_timer);
+	}
+
+	ret = goodix_ts_send_cmd(core_data, PALM_DETECTION_SWITCH_CMD, 5,
+						core_data->get_mode.palm_detection, 0x00);
+	if (ret < 0) {
+		ts_err("failed to set palm detection, enable = %d", enable);
+		goto exit;
+	}
+
+	core_data->set_mode.palm_detection = enable;
+	msleep(20);
+	ts_info("Success set palm detection to %d\n", enable);
+
+exit:
+	mutex_unlock(&core_data->mode_lock);
+	return ret;
+}
+#endif
 
 static struct ts_mmi_methods goodix_ts_mmi_methods = {
 	.get_vendor = goodix_ts_mmi_methods_get_vendor,
@@ -1160,6 +1434,10 @@ static struct ts_mmi_methods goodix_ts_mmi_methods = {
 	.charger_mode = goodix_ts_mmi_charger_mode,
 	.refresh_rate = goodix_ts_mmi_refresh_rate,
 	.active_region = goodix_ts_mmi_active_region,
+	.update_liquid_detect_mode = goodix_ts_mmi_update_liquid_detect_mode,
+#ifdef GOODIX_PALM_SENSOR_EN
+	.palm_set_enable = goodix_ts_mmi_palm_set_enable,
+#endif
 	/* Firmware */
 	.firmware_update = goodix_ts_firmware_update,
 	/* vendor specific attribute group */

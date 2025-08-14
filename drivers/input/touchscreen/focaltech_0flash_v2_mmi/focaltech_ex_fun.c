@@ -871,9 +871,12 @@ static ssize_t fts_ic_ver_show(struct device *dev,
     int count = 0;
     u8 val = 0;
     struct input_dev *input_dev = fts_data->input_dev;
+#if FTS_ESDCHECK_EN
+    struct fts_ts_data *data = fts_data;
+#endif
     mutex_lock(&input_dev->mutex);
 #if FTS_ESDCHECK_EN
-    fts_esdcheck_proc_busy(1);
+    fts_esdcheck_proc_busy(data, 1);
 #endif
     fts_read_reg(FTS_REG_VENDOR_ID, &val);
     count += snprintf(buf + count, PAGE_SIZE, "Product ID: 0x%02x\n", val);
@@ -881,7 +884,7 @@ static ssize_t fts_ic_ver_show(struct device *dev,
     count += snprintf(buf + count, PAGE_SIZE, "Build ID: 0000-%02x\n", val);
     count += scnprintf(buf + count, PAGE_SIZE, "IC: %s\n", FTS_CHIP_NAME);
 #if FTS_ESDCHECK_EN
-    fts_esdcheck_proc_busy(0);
+    fts_esdcheck_proc_busy(data, 0);
 #endif
     mutex_unlock(&input_dev->mutex);
     return count;
@@ -933,11 +936,11 @@ static ssize_t buildid_show(
     mutex_lock(&input_dev->mutex);
 
 #if FTS_ESDCHECK_EN
-    fts_esdcheck_proc_busy(1);
+    fts_esdcheck_proc_busy(ts_data, 1);
 #endif
     fts_read_reg(FTS_REG_FW_VER, &fwver);
 #if FTS_ESDCHECK_EN
-    fts_esdcheck_proc_busy(0);
+    fts_esdcheck_proc_busy(ts_data, 0);
 #endif
     if ((fwver == 0xFF) || (fwver == 0x00))
         num_read_chars = snprintf(buf, PAGE_SIZE, "get tp fw version fail!\n");
@@ -1455,6 +1458,13 @@ static ssize_t fts_log_level_store(
     sscanf(buf, "%d", &value);
     FTS_DEBUG("log level:%d->%d", ts_data->log_level, value);
     ts_data->log_level = value;
+    if (ts_data->log_level > 1) {
+        dbg_level_en = 1;
+        FTS_DEBUG("debug log level: 1");
+    } else {
+        dbg_level_en = 0;
+        FTS_DEBUG("debug log level: 0");
+    }
     mutex_unlock(&input_dev->mutex);
     FTS_FUNC_EXIT();
 
@@ -1695,11 +1705,76 @@ static ssize_t ic_ver_show(struct device *dev,
 	return fts_ic_ver_show(dev, attr, buf);
 }
 
+static ssize_t productinfo_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+    return fts_productinfo_show(dev, attr, buf);
+}
+
+static ssize_t debug_level_en_store(
+    struct device *dev,
+    struct device_attribute *attr, const char *buf, size_t count)
+{
+    int value = 0;
+    struct fts_ts_data *ts_data = dev_get_drvdata(dev);
+    struct input_dev *input_dev = ts_data->input_dev;
+
+    FTS_FUNC_ENTER();
+    mutex_lock(&input_dev->mutex);
+    sscanf(buf, "%d", &value);
+    FTS_DEBUG("dbg log level:%d->%d", dbg_level_en, value);
+    dbg_level_en = value;
+    mutex_unlock(&input_dev->mutex);
+    FTS_FUNC_EXIT();
+
+    return count;
+}
+
+static ssize_t debug_level_en_show(
+    struct device *dev, struct device_attribute *attr, char *buf)
+{
+    int count = 0;
+    struct fts_ts_data *ts_data = dev_get_drvdata(dev);
+    struct input_dev *input_dev = ts_data->input_dev;
+
+    mutex_lock(&input_dev->mutex);
+    count += snprintf(buf + count, PAGE_SIZE, "debug log level:%d\n",
+                      dbg_level_en);
+    mutex_unlock(&input_dev->mutex);
+
+    return count;
+}
+
+#ifdef FTS_LAST_TIME_EN
+static ssize_t timestamp_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fts_ts_data *ts_data = dev_get_drvdata(dev);
+	struct input_dev *input_dev = ts_data->input_dev;
+
+	ktime_t last_ktime;
+	struct timespec64 last_ts;
+
+	mutex_lock(&input_dev->mutex);
+	last_ktime = ts_data->last_event_time;
+	ts_data->last_event_time = 0;
+	mutex_unlock(&input_dev->mutex);
+
+	last_ts = ktime_to_timespec64(last_ktime);
+	return scnprintf(buf, PAGE_SIZE, "%lld.%ld\n", last_ts.tv_sec, last_ts.tv_nsec);
+}
+#endif
+
 static struct device_attribute touchscreen_attributes[] = {
 	__ATTR_RO(path),
 	__ATTR_RO(vendor),
 	__ATTR_RO(ic_ver),
 	__ATTR_RO(panel_supplier),
+	__ATTR_RO(productinfo),
+#ifdef FTS_LAST_TIME_EN
+	__ATTR_RO(timestamp),
+#endif
+	__ATTR(debug_level_en, S_IRUGO | S_IWUSR | S_IWGRP, debug_level_en_show, debug_level_en_store),
 	__ATTR_NULL
 };
 
@@ -1730,9 +1805,16 @@ static int fts_sysfs_class(void *_data, bool create)
 			return error;
 		}
 
+#ifdef FTS_LAST_TIME_EN
+		ts_class_dev = device_create(touchscreen_class, NULL,
+				MKDEV(INPUT_MAJOR, minor),
+				data, FTS_PRIMARY_NAME);
+#else
 		ts_class_dev = device_create(touchscreen_class, NULL,
 				MKDEV(INPUT_MAJOR, minor),
 				data, FTS_CHIP_NAME);
+#endif
+
 		if (IS_ERR(ts_class_dev)) {
 			error = PTR_ERR(ts_class_dev);
 			ts_class_dev = NULL;

@@ -539,6 +539,12 @@ static int fts_input_report_b(struct fts_ts_data *ts_data, struct ts_event *even
                           events[i].id, events[i].x, events[i].y,
                           events[i].p, events[i].area);
             }
+#ifdef CONFIG_FTS_LAST_TIME
+            if (FTS_TOUCH_DOWN == events[i].flag) {
+                ts_data->last_event_time = ktime_get_boottime();
+                FTS_DEBUG("TOUCH: [%d] logged timestamp\n", i);
+            }
+#endif
         } else {
             input_mt_slot(input_dev, events[i].id);
             input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, false);
@@ -737,6 +743,10 @@ static int fts_read_parse_touchdata(struct fts_ts_data *ts_data, u8 *touch_buf)
     memset(touch_buf, 0xFF, FTS_MAX_TOUCH_BUF);
     ts_data->ta_size = ts_data->touch_size;
 
+#ifdef FOCALTECH_SENSOR_EN
+    fts_read_report_fod_event(ts_data);
+#endif
+
     /*read touch data*/
     ret = fts_read_touchdata(ts_data, touch_buf);
     if (ret < 0) {
@@ -876,6 +886,42 @@ static int fts_irq_read_report(struct fts_ts_data *ts_data)
             return -EIO;
         }
 
+#ifdef CONFIG_FTS_SUPPORT_HIGH_RESOLUTION
+        for (i = 0; i < max_touch_num; i++) {
+            base = FTS_ONE_TCH_LEN * i + 2;
+            pointid = (touch_buf[FTS_TOUCH_OFF_ID_YH + base]) >> 4;
+            if (pointid >= FTS_MAX_ID)
+                break;
+            else if (pointid >= max_touch_num) {
+                FTS_ERROR("ID(%d) beyond max_touch_number", pointid);
+                return -EINVAL;
+            }
+
+            events[i].id = pointid;
+            events[i].flag = touch_buf[FTS_TOUCH_OFF_E_XH + base] >> 6;
+
+            //bit[15:12] | bit[11:4] | bit[3:0]
+            events[i].x = ((touch_buf[FTS_TOUCH_OFF_E_XH + base] & 0x0F) << 12) \
+                | ((touch_buf[FTS_TOUCH_OFF_XL + base] & 0xFF) << 4) \
+                | ((touch_buf[FTS_TOUCH_OFF_PRE + base] >> 4) & 0x0F);
+
+            //bit[15:12] | bit[11:4] | bit[3:0]
+            events[i].y = ((touch_buf[FTS_TOUCH_OFF_ID_YH + base] & 0x0F) << 12) \
+                | ((touch_buf[FTS_TOUCH_OFF_YL + base] & 0xFF) << 4) \
+                | (touch_buf[FTS_TOUCH_OFF_PRE + base] & 0x0F);
+
+            events[i].p =  touch_buf[FTS_TOUCH_OFF_PRE + base] & 0x0F;
+            events[i].area = touch_buf[FTS_TOUCH_OFF_AREA + base];
+            if (events[i].p <= 0) events[i].p = 0x3F;
+            if (events[i].area <= 0) events[i].area = 0x09;
+
+            event_num++;
+            if (EVENT_DOWN(events[i].flag) && (finger_num == 0)) {
+                FTS_INFO("abnormal touch data from fw");
+                return -EIO;
+            }
+        }
+#else
         for (i = 0; i < max_touch_num; i++) {
             base = FTS_ONE_TCH_LEN * i + 2;
             pointid = (touch_buf[FTS_TOUCH_OFF_ID_YH + base]) >> 4;
@@ -903,6 +949,7 @@ static int fts_irq_read_report(struct fts_ts_data *ts_data)
                 return -EIO;
             }
         }
+#endif
 
         if (event_num == 0) {
             FTS_INFO("no touch point information(%02x)", touch_buf[2]);
@@ -1162,6 +1209,11 @@ static int fts_input_init(struct fts_ts_data *ts_data)
             input_set_capability(input_dev, EV_KEY, pdata->keys[key_num]);
     }
 
+#ifdef FOCALTECH_SENSOR_EN
+    input_set_capability(input_dev, EV_KEY, BTN_TRIGGER_HAPPY1);
+    input_set_capability(input_dev, EV_KEY, BTN_TRIGGER_HAPPY2);
+#endif
+
 #if FTS_MT_PROTOCOL_B_EN
     input_mt_init_slots(input_dev, pdata->max_touch_number, INPUT_MT_DIRECT);
 #else
@@ -1346,24 +1398,34 @@ static int fts_pinctrl_init(struct fts_ts_data *ts)
 
     ts->pins_active = pinctrl_lookup_state(ts->pinctrl, "pmx_ts_active");
     if (IS_ERR_OR_NULL(ts->pins_active)) {
-        FTS_ERROR("Pin state[active] not found");
-        ret = PTR_ERR(ts->pins_active);
-        goto err_pinctrl_lookup;
+        ts->pins_active = pinctrl_lookup_state(ts->pinctrl, "cli_pmx_ts_active");
+        if (IS_ERR_OR_NULL(ts->pins_active)) {
+            FTS_ERROR("Pin state[active] not found");
+            ret = PTR_ERR(ts->pins_active);
+            goto err_pinctrl_lookup;
+        }
     }
 
     ts->pins_suspend = pinctrl_lookup_state(ts->pinctrl, "pmx_ts_suspend");
     if (IS_ERR_OR_NULL(ts->pins_suspend)) {
-        FTS_ERROR("Pin state[suspend] not found");
-        ret = PTR_ERR(ts->pins_suspend);
-        goto err_pinctrl_lookup;
+        ts->pins_suspend = pinctrl_lookup_state(ts->pinctrl, "cli_pmx_ts_suspend");
+        if (IS_ERR_OR_NULL(ts->pins_suspend)) {
+            FTS_ERROR("Pin state[suspend] not found");
+            ret = PTR_ERR(ts->pins_suspend);
+            goto err_pinctrl_lookup;
+        }
     }
 
     ts->pins_release = pinctrl_lookup_state(ts->pinctrl, "pmx_ts_release");
     if (IS_ERR_OR_NULL(ts->pins_release)) {
-        FTS_ERROR("Pin state[release] not found");
-        ret = PTR_ERR(ts->pins_release);
+        ts->pins_release = pinctrl_lookup_state(ts->pinctrl, "cli_pmx_ts_release");
+        if (IS_ERR_OR_NULL(ts->pins_release)) {
+            FTS_ERROR("Pin state[release] not found");
+            ret = PTR_ERR(ts->pins_release);
+        }
     }
 
+    FTS_INFO("Pinctrl init success");
     return 0;
 err_pinctrl_lookup:
     if (ts->pinctrl) {
@@ -1424,6 +1486,52 @@ static int fts_pinctrl_select_release(struct fts_ts_data *ts)
 }
 #endif /* FTS_PINCTRL_EN */
 
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+static int fts_vdd_gpio_low(struct fts_ts_data *data)
+{
+    int ret = 0;
+
+    FTS_FUNC_ENTER();
+
+    ret = gpio_direction_output(data->pdata->vdd_gpio, 0);
+    if (ret) {
+       FTS_ERROR("[GPIO]set_direction for reset gpio failed");
+       goto err_vdd_gpio_dir;
+    }
+
+    FTS_FUNC_EXIT();
+    return 0;
+
+err_vdd_gpio_dir:
+    if (gpio_is_valid(data->pdata->vdd_gpio))
+        gpio_free(data->pdata->vdd_gpio);
+
+    return ret;
+}
+
+static int fts_vdd_gpio_high(struct fts_ts_data *data)
+{
+    int ret = 0;
+
+    FTS_FUNC_ENTER();
+
+    ret = gpio_direction_output(data->pdata->vdd_gpio, 1);
+    if (ret) {
+       FTS_ERROR("[GPIO]set_direction for reset gpio failed");
+       goto err_vdd_gpio_dir;
+    }
+
+    FTS_FUNC_EXIT();
+    return 0;
+
+err_vdd_gpio_dir:
+    if (gpio_is_valid(data->pdata->vdd_gpio))
+        gpio_free(data->pdata->vdd_gpio);
+
+    return ret;
+}
+#endif
+
 int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable)
 {
     int ret = 0;
@@ -1444,12 +1552,17 @@ int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable)
                 FTS_ERROR("enable vdd regulator failed,ret=%d", ret);
             }
 
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+            fts_vdd_gpio_high(ts_data);
+#endif
+
             if (!IS_ERR_OR_NULL(ts_data->vcc_i2c)) {
                 ret = regulator_enable(ts_data->vcc_i2c);
                 if (ret) {
                     FTS_ERROR("enable vcc_i2c regulator failed,ret=%d", ret);
                 }
             }
+
 #if FTS_PINCTRL_EN
             fts_pinctrl_select_normal(ts_data);
 #endif
@@ -1464,6 +1577,11 @@ int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable)
             if (ret) {
                 FTS_ERROR("disable vdd regulator failed,ret=%d", ret);
             }
+
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+            fts_vdd_gpio_low(ts_data);
+#endif
+
             if (!IS_ERR_OR_NULL(ts_data->vcc_i2c)) {
                 ret = regulator_disable(ts_data->vcc_i2c);
                 if (ret) {
@@ -1606,6 +1724,23 @@ static int fts_gpio_configure(struct fts_ts_data *data)
     int ret = 0;
 
     FTS_FUNC_ENTER();
+
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+    if (gpio_is_valid(data->pdata->vdd_gpio)) {
+        ret = gpio_request(data->pdata->vdd_gpio, "fts_vdd_gpio");
+        if (ret) {
+            FTS_ERROR("[GPIO]vdd_gpio request failed");
+            goto err_vdd_gpio_dir;
+        }
+
+        ret = gpio_direction_output(data->pdata->vdd_gpio, 0);
+        if (ret) {
+            FTS_ERROR("[GPIO]set_direction for reset gpio failed");
+            goto err_vdd_gpio_dir;
+        }
+    }
+#endif
+
     /* request irq gpio */
     if (gpio_is_valid(data->pdata->irq_gpio)) {
         ret = gpio_request(data->pdata->irq_gpio, "fts_irq_gpio");
@@ -1645,6 +1780,11 @@ err_reset_gpio_dir:
 err_irq_gpio_dir:
     if (gpio_is_valid(data->pdata->irq_gpio))
         gpio_free(data->pdata->irq_gpio);
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+err_vdd_gpio_dir:
+    if (gpio_is_valid(data->pdata->vdd_gpio))
+        gpio_free(data->pdata->vdd_gpio);
+#endif
 err_irq_gpio_req:
     FTS_FUNC_EXIT();
     return ret;
@@ -1738,6 +1878,14 @@ static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
                  pdata->key_x_coords[2], pdata->key_y_coords[2]);
     }
 
+
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+    pdata->vdd_gpio = of_get_named_gpio_flags(np, "focaltech,vdd-gpio",
+                        0, &pdata->vdd_gpio_flags);
+    if (pdata->vdd_gpio < 0)
+        FTS_ERROR("Unable to get vdd_gpio");
+#endif
+
     /* reset, irq gpio info */
     pdata->reset_gpio = of_get_named_gpio_flags(np, "focaltech,reset-gpio",
                         0, &pdata->reset_gpio_flags);
@@ -1762,8 +1910,32 @@ static int fts_parse_dt(struct device *dev, struct fts_ts_platform_data *pdata)
             pdata->max_touch_number = temp_val;
     }
 
-    FTS_INFO("max touch number:%d, irq gpio:%d, reset gpio:%d",
+    pdata->pocket_mode_ctrl = of_property_read_bool(np, "fts,pocket-mode-ctrl");
+    if (pdata->pocket_mode_ctrl)
+        FTS_INFO("Support fts touch pocket mode");
+
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+    FTS_INFO("max touch number:%d, irq gpio:%d, reset gpio:%d, vdd_gpio:%d",
+             pdata->max_touch_number, pdata->irq_gpio, pdata->reset_gpio, pdata->vdd_gpio);
+#else
+    FTS_INFO("max touch number:%d, irq gpio:%d, reset gpio:%d,",
              pdata->max_touch_number, pdata->irq_gpio, pdata->reset_gpio);
+#endif
+
+	pdata->edge_ctrl = of_property_read_bool(np,
+					"focaltech,edge-ctrl");
+	if (pdata->edge_ctrl)
+		FTS_INFO("support focaltech edge mode");
+
+	pdata->interpolation_ctrl = of_property_read_bool(np,
+					"focaltech,interpolation-ctrl");
+	if (pdata->interpolation_ctrl)
+		FTS_INFO("support focaltech interpolation mode");
+
+	pdata->report_rate_ctrl = of_property_read_bool(np,
+					"focaltech,report_rate-ctrl");
+	if (pdata->report_rate_ctrl)
+		FTS_INFO("support focaltech report rate switch mode");
 
     FTS_FUNC_EXIT();
     return 0;
@@ -2269,6 +2441,20 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
     return 0;
 }
 
+#ifdef FOCALTECH_SENSOR_EN
+bool fts_is_fod_resume(struct fts_ts_data *ts_data)
+{
+    unsigned long fod_timeout = msecs_to_jiffies(3000);
+
+    fod_timeout += ts_data->fod_jiffies;
+    if (time_before(jiffies, fod_timeout)) {
+        return true;
+    }
+
+    return false;
+}
+#endif
+
 #ifndef CONFIG_INPUT_TOUCHSCREEN_MMI
 static int fts_ts_suspend(struct device *dev)
 {
@@ -2509,6 +2695,9 @@ static void __exit fts_ts_exit(void)
 module_init(fts_ts_init);
 module_exit(fts_ts_exit);
 
+#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
 MODULE_AUTHOR("FocalTech Driver Team");
 MODULE_DESCRIPTION("FocalTech Touchscreen Driver");
 MODULE_LICENSE("GPL v2");

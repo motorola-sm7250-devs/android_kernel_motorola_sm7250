@@ -46,6 +46,8 @@
 
 #define GOODIX_NORMAL_RESET_DELAY_MS	100
 #define GOODIX_HOLD_CPU_RESET_DELAY_MS  5
+#define GOODIX_PALM_RELEASE_DELAY_MS  200
+
 
 #define GOODIX_RETRY_3					3
 #define GOODIX_RETRY_5					5
@@ -58,6 +60,13 @@
 #define PINCTRL_STYLUS_CLK_SUSPEND		"stylus_clk_suspend"
 #define STYLUS_CLK_SRC_GPIO				"stylus_clk_gpio"
 #define STYLUS_CLK_SRC_PMIC				"stylus_clk_pmic"
+
+#define GOODIX_GESTURE_DOUBLE_TAP		0xCC
+#define GOODIX_GESTURE_SINGLE_TAP		0x4C
+#define GOODIX_GESTURE_FOD_DOWN			0x46
+#define GOODIX_GESTURE_FOD_UP			0x55
+#define GOODIX_GESTURE_UNDER_WATER		0x20
+#define GOODIX_GESTURE_PALM_DETECTION		0x40
 
 enum GOODIX_GESTURE_TYP {
 	GESTURE_SINGLE_TAP = (1 << 0),
@@ -402,6 +411,7 @@ struct goodix_ts_event {
 	enum ts_event_type event_type;
 	u8 request_code; /* represent the request type */
 	u8 gesture_type;
+	u8 gesture_report_info;
 	struct goodix_touch_data touch_data;
 	struct goodix_pen_data pen_data;
 #ifdef CONFIG_GTP_FOD
@@ -430,7 +440,7 @@ struct goodix_ts_hw_ops {
 	int (*dev_confirm)(struct goodix_ts_core *cd);
 	int (*resume)(struct goodix_ts_core *cd);
 	int (*suspend)(struct goodix_ts_core *cd);
-	int (*gesture)(struct goodix_ts_core *cd, int gesture_type);
+	int (*gesture)(struct goodix_ts_core *cd, unsigned int gesture_type);
 	int (*reset)(struct goodix_ts_core *cd, int delay_ms);
 	int (*irq_enable)(struct goodix_ts_core *cd, bool enable);
 	int (*read)(struct goodix_ts_core *cd, unsigned int addr,
@@ -446,6 +456,7 @@ struct goodix_ts_hw_ops {
 	int (*event_handler)(struct goodix_ts_core *cd, struct goodix_ts_event *ts_event);
 	int (*after_event_handler)(struct goodix_ts_core *cd); /* clean sync flag */
 	int (*get_capacitance_data)(struct goodix_ts_core *cd, struct ts_rawdata_info *info);
+	int (*display_mode)(struct goodix_ts_core *cd, int mode);
 };
 
 /*
@@ -482,6 +493,10 @@ struct goodix_mode_info {
 	int sample;
 	int report_rate_mode;
 	int edge_mode[2];
+	int liquid_detection;
+#ifdef GOODIX_PALM_SENSOR_EN
+	int palm_detection;
+#endif
 };
 
 struct goodix_ts_core {
@@ -510,6 +525,12 @@ struct goodix_ts_core {
 	int power_on;
 	int irq;
 	size_t irq_trig_cnt;
+	int liquid_status;
+#ifdef GOODIX_PALM_SENSOR_EN
+	atomic_t  palm_status;
+	struct timer_list palm_release_timer;
+	unsigned int palm_release_delay_ms;
+#endif
 
 	atomic_t irq_enabled;
 	atomic_t suspended;
@@ -548,8 +569,14 @@ struct goodix_ts_core {
 #ifdef CONFIG_GTP_LAST_TIME
 	ktime_t last_event_time;
 #endif
+	unsigned short gesture_cmd;
 	atomic_t pm_resume;
 	wait_queue_head_t pm_wq;
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+	atomic_t trigger_enable;
+	u8 trigger_buf[2000];
+#endif
 };
 
 /* external module structures */
@@ -715,6 +742,14 @@ void goodix_stylus_dda_init(void);
 void goodix_stylus_dda_exit(void);
 int goodix_stylus_dda_register_cdevice(void);
 void goodix_dda_process_pen_report(struct goodix_pen_data *pen_data);
+#endif
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+int frame_log_capture_start(struct goodix_ts_core *cd);
+void put_fifo_with_discard(char *log_buf, int len);
+void clear_kfifo(void);
+int goodix_log_capture_register_misc(void);
+int goodix_log_capture_unregister_misc(void);
 #endif
 
 #endif

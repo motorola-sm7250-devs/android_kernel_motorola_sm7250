@@ -327,6 +327,120 @@ static ssize_t pwr_store(struct device *dev,
 }
 static DEVICE_ATTR(pwr, (S_IWUSR | S_IWGRP), NULL, pwr_store);
 
+#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
+/*
+ * gesture value used to indicate which gesture mode type is enabled
+ */
+static ssize_t gesture_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%02x\n", touch_cdev->pdata.supported_gesture_type);
+}
+static ssize_t gesture_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
+	unsigned int value = 0;
+	int err = 0;
+
+	mutex_lock(&touch_cdev->extif_mutex);
+	err = sscanf(buf, "%d", &value);
+	if (err < 0) {
+		dev_err(dev, "forcereflash: Failed to convert value\n");
+		mutex_unlock(&touch_cdev->extif_mutex);
+		return -EINVAL;
+	}
+	switch (value) {
+		case 0x10:
+			dev_info(dev, "%s: zero tap disable\n", __func__);
+			touch_cdev->gesture_mode_type &= 0xFE;
+			break;
+		case 0x11:
+			dev_info(dev, "%s: zero tap enable\n", __func__);
+			touch_cdev->gesture_mode_type |= 0x01;
+			break;
+		case 0x20:
+			dev_info(dev, "%s: single tap disable\n", __func__);
+			touch_cdev->gesture_mode_type &= 0xFD;
+			break;
+		case 0x21:
+			dev_info(dev, "%s: single tap enable\n", __func__);
+			touch_cdev->gesture_mode_type |= 0x02;
+			break;
+		case 0x30:
+			dev_info(dev, "%s: double tap disable\n", __func__);
+			touch_cdev->gesture_mode_type &= 0xFB;
+			break;
+		case 0x31:
+			dev_info(dev, "%s: double tap enable\n", __func__);
+			touch_cdev->gesture_mode_type |= 0x04;
+			break;
+		default:
+			dev_info(dev, "%s: unsupport gesture mode type\n", __func__);
+			;
+	}
+	mutex_unlock(&touch_cdev->extif_mutex);
+	dev_info(dev, "%s: gesture_mode_type = 0x%02x \n", __func__, touch_cdev->gesture_mode_type);
+
+	return size;
+}
+static DEVICE_ATTR(gesture, (S_IWUSR | S_IWGRP | S_IRUGO), gesture_show, gesture_store);
+#endif
+
+/*
+ * Show liquid detection function status and detection result
+ */
+static ssize_t liquid_detection_ctl_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "function status: %02x, detection result: %02x\n",
+		touch_cdev->lpd_state, touch_cdev->liquid_status);
+}
+
+/*
+ * Enable/disable liquid detection function for debug
+ */
+static ssize_t liquid_detection_ctl_store(struct device *dev,
+			struct device_attribute *attr, const char *buf, size_t size)
+{
+	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
+	unsigned int value = 0;
+	int err = 0;
+
+	err = sscanf(buf, "%d", &value);
+	if (err < 0) {
+		dev_err(dev, "liquid_detection_ctl: Failed to convert value\n");
+		return -EINVAL;
+	}
+
+	if (value == 2) {
+		dev_info(dev, "liquid_detection_ctl: Not support liquid detecion\n");
+		touch_cdev->pdata.support_liquid_detection = 0;
+		return size;
+	} else if (value == 3) {
+		dev_info(dev, "liquid_detection_ctl: Support liquid detecion\n");
+		touch_cdev->pdata.support_liquid_detection = 1;
+		return size;
+	}
+
+	mutex_lock(&touch_cdev->extif_mutex);
+	if (value != touch_cdev->lpd_state) {
+		touch_cdev->lpd_state = !!value;
+		kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_LIQUID_DETECTION);
+		schedule_delayed_work(&touch_cdev->work, 0);
+		dev_info(DEV_MMI, "%s: LPD state is %d\n", __func__, touch_cdev->lpd_state);
+	}
+	mutex_unlock(&touch_cdev->extif_mutex);
+
+	return size;
+}
+static DEVICE_ATTR(liquid_detection_ctl, (S_IWUSR | S_IWGRP | S_IRUGO),
+	liquid_detection_ctl_show, liquid_detection_ctl_store);
+
 static struct attribute *sysfs_class_attrs[] = {
 	&dev_attr_path.attr,
 	&dev_attr_vendor.attr,
@@ -356,6 +470,10 @@ static struct attribute *sysfs_class_attrs[] = {
 	&dev_attr_poison_distance.attr,
 	&dev_attr_poison_trigger_distance.attr,
 #endif
+#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
+	&dev_attr_gesture.attr,
+#endif
+	&dev_attr_liquid_detection_ctl.attr,
 	NULL,
 };
 
@@ -644,6 +762,31 @@ static int get_supplier_handler(struct device *parent, const char **psname)
 	return 0;
 }
 
+static int get_gesture_type_handler(struct device *parent, unsigned char *gesture_type)
+{
+	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
+	if (!touch_cdev)
+		return -ENODEV;
+	*gesture_type = touch_cdev->gesture_mode_type;
+	return 0;
+}
+
+static int report_liquid_detection_status_handler(struct device *parent, int status)
+{
+	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
+	if (!touch_cdev)
+		return -ENODEV;
+
+	dev_info(DEV_TS, "%s: notify liquid detection status: %d\n", __func__, status);
+	touch_cdev->liquid_status = status;
+	if (touch_cdev->is_lpd_registered)
+		relay_notifier_fire(BLOCKING, LPD, NOTIFY_EVENT_TUD_STATUS,
+			(void *)&status);
+	else
+		dev_err(DEV_TS, "%s: lpd_notifier does not register\n", __func__);
+	return 0;
+}
+
 static int ts_mmi_default_pinctrl(struct device *parent, int on)
 {
 	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
@@ -741,6 +884,8 @@ int ts_mmi_dev_register(struct device *parent,
 	}
 	touch_cdev->mdata->exports.get_class_fname = get_class_fname_handler;
 	touch_cdev->mdata->exports.get_supplier = get_supplier_handler;
+	touch_cdev->mdata->exports.get_gesture_type = get_gesture_type_handler;
+	touch_cdev->mdata->exports.report_liquid_detection_status = report_liquid_detection_status_handler;
 	touch_cdev->mdata->exports.kobj_notify = &DEV_MMI->kobj;
 
 	down_write(&touchscreens_list_lock);
@@ -787,6 +932,15 @@ int ts_mmi_dev_register(struct device *parent,
 		ret = ts_mmi_gesture_init(touch_cdev);
 		if (ret < 0) {
 			dev_err(DEV_TS, "%s: Register gesture failed. %d\n",
+				__func__, ret);
+			goto GESTURE_INIT_FAILED;
+		}
+	}
+
+	if (touch_cdev->pdata.cli_gestures_enabled) {
+		ret = ts_mmi_cli_gesture_init(touch_cdev);
+		if (ret < 0) {
+			dev_err(DEV_TS, "%s: Register CLI gesture failed. %d\n",
 				__func__, ret);
 			goto GESTURE_INIT_FAILED;
 		}
@@ -859,6 +1013,8 @@ void ts_mmi_dev_unregister(struct device *parent)
 	}
 	if (touch_cdev->pdata.gestures_enabled)
 		ts_mmi_gesture_remove(touch_cdev);
+	if (touch_cdev->pdata.cli_gestures_enabled)
+		ts_mmi_cli_gesture_remove(touch_cdev);
 	if (touch_cdev->pdata.palm_enabled)
 		ts_mmi_palm_remove(touch_cdev);
 	ts_mmi_notifiers_unregister(touch_cdev);

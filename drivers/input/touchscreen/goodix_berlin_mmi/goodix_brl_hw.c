@@ -15,6 +15,7 @@
   *
   */
 #include "goodix_ts_core.h"
+#include "goodix_ts_mmi.h"
 
 /* berlin_A SPI mode setting */
 #define GOODIX_SPI_MODE_REG			0xC900
@@ -41,6 +42,7 @@
 #define GOODIX_IC_INFO_ADDR_BRA		0x10068
 #define GOODIX_IC_INFO_ADDR			0x10070
 
+#define TRIGGER_FRAME_CNT 50
 
 enum brl_request_code {
 	BRL_REQUEST_CODE_CONFIG = 0x01,
@@ -48,6 +50,20 @@ enum brl_request_code {
 	BRL_REQUEST_CODE_RESET = 0x03,
 	BRL_REQUEST_CODE_CLOCK = 0x04,
 };
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+enum {
+	PROCESS_REF = 0,
+	PROCESS_RAW,
+	PROCESS_DIFF,
+	PROCESS_B_ARRAY
+};
+
+static struct frame_log_t {
+	u8 *buf;
+	int used;
+} frame_log;
+#endif
 
 static int brl_select_spi_mode(struct goodix_ts_core *cd)
 {
@@ -237,17 +253,22 @@ int brl_resume(struct goodix_ts_core *cd)
 }
 
 #define GOODIX_GESTURE_CMD	0xA6
-int brl_gesture(struct goodix_ts_core *cd, int gesture_type)
+int brl_gesture(struct goodix_ts_core *cd, unsigned int gesture_type)
 {
 	struct goodix_ts_cmd cmd;
 
 	cmd.cmd = GOODIX_GESTURE_CMD;
-#ifdef CONFIG_GTP_FOD
-	cmd.len = 6;
-#else
-	cmd.len = 5;
-#endif
-	cmd.data[0] = gesture_type;
+	cmd.data[0] = gesture_type & 0xFF;
+	if (cd->bus->ic_type == IC_TYPE_BERLIN_D) {
+		cmd.len = 6;
+		cmd.data[1] = (gesture_type >> 8) & 0xFF;
+	} else if (cd->bus->ic_type == IC_TYPE_BERLIN_B) {
+		cmd.len = 8;
+		cmd.data[2] = (gesture_type >> 16) & 0xFF;
+		cmd.data[3] = (gesture_type >> 24) & 0xFF;
+	} else
+		cmd.len = 5;
+
 	if (cd->hw_ops->send_cmd(cd, &cmd))
 		ts_err("failed send gesture cmd");
 
@@ -394,6 +415,37 @@ static int brl_send_cmd(struct goodix_ts_core *cd,
 	ts_err("failed get valid cmd ack");
 	return -EINVAL;
 }
+
+#ifdef CONFIG_GTP_DISP_MODE
+#define DISP_MODE_CMD_LEN 5
+#define DISP_MODE_CMD 0xbb
+#define DISP_MODE_MAX 4
+
+static int brl_set_display_mode(struct goodix_ts_core *cd, int mode)
+{
+	struct goodix_ts_cmd temp_cmd;
+	int ret;
+
+	if (mode < 0 || mode > DISP_MODE_MAX) {
+		ts_err("invalid mode: %d", mode);
+		return -EINVAL;
+	}
+	temp_cmd.len = DISP_MODE_CMD_LEN;
+	temp_cmd.cmd = DISP_MODE_CMD;
+	temp_cmd.data[0] = mode;
+
+	ret = brl_send_cmd(cd, &temp_cmd);
+	if (ret < 0) {
+		ts_err("failed to set display mode");
+		return -EIO;
+	}
+	ts_info("set display mode: %d", temp_cmd.data[0]);
+
+	return 0;
+}
+#else
+static int inline brl_set_display_mode(struct goodix_ts_core *cd, int mode) { return -EINVAL; }
+#endif
 
 #pragma  pack(1)
 struct goodix_config_head {
@@ -853,6 +905,8 @@ static void print_ic_info(struct goodix_ic_info *ic_info)
 		misc->fw_state_addr, misc->fw_state_len);
 	ts_info("FW-Buffer:                     0x%04X, %d",
 		misc->fw_buffer_addr, misc->fw_buffer_max_len);
+	ts_info("frame_data_addr:               0x%04x",
+		misc->frame_data_addr);
 	ts_info("Touch-Data:                    0x%04X, %d",
 		misc->touch_data_addr, misc->touch_data_head_len);
 	ts_info("point_struct_len:              %d",
@@ -1070,10 +1124,41 @@ static int goodix_touch_handler(struct goodix_ts_core *cd,
 	int  fp_flags = 0;
 	static int pre_flags = 0;
 #endif
+	int underwater_flag = 0;
+#ifdef GOODIX_PALM_SENSOR_EN
+	int palm_flag = 0;
+#endif
 	/* clean event buffer */
 	memset(ts_event, 0, sizeof(*ts_event));
 	/* copy pre-data to buffer */
 	memcpy(buffer, pre_buf, pre_buf_len);
+
+	if (cd->set_mode.liquid_detection) {
+		underwater_flag = buffer[2] & GOODIX_GESTURE_UNDER_WATER;
+		if (cd->liquid_status != underwater_flag) {
+			cd->liquid_status = underwater_flag;
+			/* call class method */
+			cd->imports->report_liquid_detection_status(cd->bus->dev, cd->liquid_status? 1:0);
+			ts_info("under water flag changed to 0x%x\n", cd->liquid_status);
+		}
+	}
+
+#ifdef GOODIX_PALM_SENSOR_EN
+	if (cd->set_mode.palm_detection) {
+		palm_flag = buffer[2] & GOODIX_GESTURE_PALM_DETECTION;
+		if (palm_flag) {
+			mod_timer(&cd->palm_release_timer,
+				jiffies + msecs_to_jiffies(cd->palm_release_delay_ms));
+		}
+		if (atomic_read(&cd->palm_status) != palm_flag) {
+			atomic_set(&cd->palm_status, palm_flag);
+			/* call class method */
+			if (cd->imports && cd->imports->report_palm)
+				cd->imports->report_palm(palm_flag);
+			ts_info("palm detection flag changed to: 0x%x\n", palm_flag);
+		}
+	}
+#endif
 
 	touch_num = buffer[2] & 0x0F;
 
@@ -1172,6 +1257,121 @@ static int goodix_touch_handler(struct goodix_ts_core *cd,
 	return 0;
 }
 
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+int frame_log_capture_start(struct goodix_ts_core *cd)
+{
+	struct goodix_ts_cmd tmp_cmd;
+
+	if (atomic_read(&cd->trigger_enable) != 0)
+		return 0;
+
+	frame_log.buf = vmalloc(4 * 1024);
+	if (!frame_log.buf)
+		return -ENOMEM;
+	frame_log.used = 0;
+
+	tmp_cmd.len = 5;
+	tmp_cmd.cmd = 0x90;
+	tmp_cmd.data[0] = 0x83;
+	cd->hw_ops->send_cmd(cd, &tmp_cmd);
+	atomic_set(&cd->trigger_enable, 1);
+	return 0;
+}
+
+static void goodix_cache_debug_log(struct goodix_ts_core *cd)
+{
+	u8 sync = 0;
+	u8 diff_cmd[] = {0x00, 0x00, 0x05, 0x90, 0x82, 0x17, 0x01};
+	u8 raw_cmd[] = {0x00, 0x00, 0x05, 0x90, 0x81, 0x16, 0x01};
+	u8 b_cmd[] = {0x00, 0x00, 0x05, 0x90, 0x87, 0x1C, 0x01};
+	u8 freq_cmd[] = {0x00, 0x00, 0x05, 0x9C, 0x00, 0xA1, 0x00};
+	struct goodix_ts_hw_ops *hw_ops = cd->hw_ops;
+	struct goodix_ic_info_misc *misc = &cd->ic_info.misc;
+	static int discard_frames = 3;
+	static int frame_cnt;
+	static int freq_index;
+	static int process;
+	u32 cmd_addr = misc->cmd_addr;
+	int freq_num = cd->ic_info.parm.mutual_freq_num;
+	u8 frame_type = 0;
+	u8 *frame_ptr = misc->frame_data_addr - misc->touch_data_addr + cd->trigger_buf;
+	int frame_len = le16_to_cpup((__le16 *)(frame_ptr + 3));
+	static size_t total_cnt;
+
+	hw_ops->write(cd, misc->frame_data_addr, &sync, 1);
+	if (discard_frames > 0) {
+		discard_frames--;
+		return;
+	}
+
+	if (process == PROCESS_REF)
+		frame_type = 0x01;
+	else if (process == PROCESS_DIFF)
+		frame_type = 0x03;
+	else if (process == PROCESS_RAW)
+		frame_type = 0x02;
+	else if (process == PROCESS_B_ARRAY)
+		frame_type = 0x04;
+
+	memset(frame_log.buf + frame_log.used, 0xAA, 4);
+	frame_log.used += 4;
+	frame_log.buf[frame_log.used++] = frame_len & 0xFF;
+	frame_log.buf[frame_log.used++] = (frame_len >> 8) & 0xFF;
+	frame_log.buf[frame_log.used++] = frame_type;
+	memcpy(frame_log.buf + frame_log.used, frame_ptr, frame_len);
+	frame_log.used += frame_len;
+
+	total_cnt += frame_log.used;
+	ts_info("frame log used:%d, total cnt:%zu", frame_log.used, total_cnt);
+	put_fifo_with_discard(frame_log.buf, frame_log.used);
+	memset(frame_log.buf, 0x0, sizeof(frame_log.used));
+	frame_log.used = 0;
+
+	if (process == PROCESS_REF) {
+		hw_ops->write(cd, cmd_addr, diff_cmd, (int)sizeof(diff_cmd));
+		discard_frames = 3;
+		process = PROCESS_DIFF;
+	} else if (process == PROCESS_DIFF) {
+		frame_cnt++;
+		if (frame_cnt >= TRIGGER_FRAME_CNT) {
+			hw_ops->write(cd, cmd_addr, raw_cmd, (int)sizeof(raw_cmd));
+			discard_frames = 3;
+			frame_cnt = 0;
+			process = PROCESS_RAW;
+		}
+	} else if (process == PROCESS_RAW) {
+		frame_cnt++;
+		if (frame_cnt >= TRIGGER_FRAME_CNT) {
+			discard_frames = 3;
+			frame_cnt = 0;
+			freq_cmd[4] = freq_index;
+			freq_cmd[5] += freq_index;
+			freq_index++;
+			if (freq_index > freq_num) {
+				process = 0;
+				freq_index = 0;
+				hw_ops->reset(cd, 100);
+				atomic_set(&cd->trigger_enable, 0);
+				total_cnt = 0;
+				vfree(frame_log.buf);
+				ts_info("Notify raw data capture down");
+				sysfs_notify(cd->imports->kobj_notify, NULL, "log_trigger");
+			} else {
+				hw_ops->write(cd, cmd_addr, freq_cmd, (int)sizeof(freq_cmd));
+				usleep_range(5000, 5100);
+				hw_ops->write(cd, cmd_addr, b_cmd, (int)sizeof(b_cmd));
+				process = PROCESS_B_ARRAY;
+			}
+		}
+	} else if (process == PROCESS_B_ARRAY) {
+		discard_frames = 3;
+		frame_cnt = 0;
+		process = PROCESS_DIFF;
+		hw_ops->write(cd, cmd_addr, diff_cmd, (int)sizeof(diff_cmd));
+	}
+}
+#endif
+
 static int brl_event_handler(struct goodix_ts_core *cd,
 			 struct goodix_ts_event *ts_event)
 {
@@ -1184,8 +1384,19 @@ static int brl_event_handler(struct goodix_ts_core *cd,
 
 	pre_read_len = IRQ_EVENT_HEAD_LEN +
 		BYTES_PER_POINT * 2 + COOR_DATA_CHECKSUM_SIZE;
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+	if (atomic_read(&cd->trigger_enable) == 1) {
+		ret = hw_ops->read(cd, misc->touch_data_addr, cd->trigger_buf, sizeof(cd->trigger_buf));
+		memcpy(pre_buf, cd->trigger_buf, pre_read_len);
+		goodix_cache_debug_log(cd);
+	} else {
+		ret = hw_ops->read(cd, misc->touch_data_addr,
+				pre_buf, pre_read_len);
+	}
+#else
 	ret = hw_ops->read(cd, misc->touch_data_addr,
-			   pre_buf, pre_read_len);
+			pre_buf, pre_read_len);
+#endif
 	if (ret) {
 		ts_debug("failed get event head data");
 		return ret;
@@ -1213,6 +1424,7 @@ static int brl_event_handler(struct goodix_ts_core *cd,
 			ts_debug("unsupported request code 0x%x", pre_buf[2]);
 	} else if (event_status & GOODIX_GESTURE_EVENT) {
 		ts_event->event_type = EVENT_GESTURE;
+		ts_event->gesture_report_info = pre_buf[2];
 		ts_event->gesture_type = pre_buf[4];
 #ifdef CONFIG_GTP_FOD
 		memcpy(ts_event->gesture_data, &pre_buf[8],
@@ -1465,6 +1677,7 @@ static struct goodix_ts_hw_ops brl_hw_ops = {
 	.event_handler = brl_event_handler,
 	.after_event_handler = brl_after_event_handler,
 	.get_capacitance_data = brl_get_capacitance_data,
+	.display_mode = brl_set_display_mode,
 };
 
 struct goodix_ts_hw_ops *goodix_get_hw_ops(void)

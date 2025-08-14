@@ -88,6 +88,7 @@ struct bq25980_state {
 	bool ce;
 	bool hiz;
 	bool bypass;
+	bool cp_switch;//add cp_switch state
 
 	u32 vbat_adc;
 	u32 vsys_adc;
@@ -282,7 +283,7 @@ static struct reg_default sc8541_reg_init_val[] = {
 	{BQ25980_MASK4,		0x00},
 	{BQ25980_MASK5,		0x00},
 
-	{BQ25980_ADC_CONTROL1,	0x80},
+	{BQ25980_ADC_CONTROL1,	0x80},//enable ADC_EN
 	{BQ25980_ADC_CONTROL2,	0x06}, //0x26: enable vac1 vac2 adc and vout adc
 
 };
@@ -314,7 +315,7 @@ static struct reg_default bq25960_reg_init_val[] = {
 	{BQ25980_MASK4,		0x00},
 	{BQ25980_MASK5,		0x80},
 
-	{BQ25980_ADC_CONTROL1,	0x84},//sample 14 bit
+	{BQ25980_ADC_CONTROL1,	0x04},//sample 14 bit
 	{BQ25980_ADC_CONTROL2,	0xE6},
 
 };
@@ -543,7 +544,7 @@ static int bq25980_reg_init(struct bq25980_device *bq);
 //static int bq25980_watchdog_time[BQ25980_NUM_WD_VAL] = {5000, 10000, 50000,
 //							300000};
 
-static void dump_reg(struct bq25980_device *bq, int start, int end)
+/*static void dump_reg(struct bq25980_device *bq, int start, int end)
 {
 	int ret;
 	unsigned int val;
@@ -554,7 +555,7 @@ static void dump_reg(struct bq25980_device *bq, int start, int end)
 		if (!ret)
 			dev_err(bq->dev, "[%s] Reg[%02X] = 0x%02X\n", bq->model_name, addr, val);
 	}
-}
+}*/
 
 static void dump_all_reg(struct bq25980_device *bq)
 {
@@ -906,6 +907,7 @@ static int bq25980_get_state(struct bq25980_device *bq,
 	unsigned int stat2;
 	unsigned int stat3;
 	unsigned int stat4;
+	unsigned int stat5;
 	unsigned int ibat_adc_msb;
 	int ret;
 
@@ -922,6 +924,10 @@ static int bq25980_get_state(struct bq25980_device *bq,
 		return ret;
 
 	ret = regmap_read(bq->regmap, BQ25980_STAT4, &stat4);
+	if (ret)
+		return ret;
+
+	ret = regmap_read(bq->regmap, BQ25980_STAT5, &stat5);
 	if (ret)
 		return ret;
 
@@ -944,6 +950,7 @@ static int bq25980_get_state(struct bq25980_device *bq,
 	state->ce = chg_ctrl_2 & BQ25980_CHG_EN;
 	state->hiz = chg_ctrl_2 & BQ25980_EN_HIZ;
 	state->bypass = chg_ctrl_2 & BQ25980_EN_BYPASS;
+	state->cp_switch = stat5 & BQ25980_STAT5_CP_SWITCH_MASK;
 
 	bq->alarm_status.bits.bat_ovp_alarm = stat1 & BQ25980_STAT1_BAT_OVP_ALM_MASK;
 	bq->alarm_status.bits.bat_ocp_alarm = stat1 & BQ25980_STAT1_BAT_OCP_ALM_MASK;
@@ -1219,15 +1226,15 @@ static int bq25980_get_charger_property(struct power_supply *psy,
 
 		val->intval = ret;
 		break;
-/*	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_SETTLED: //undeclared identifier
+	case POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT:
 		ret = bq25980_get_adc_vbus(bq);
 		if (ret < 0)
 			return ret;
 
 		val->intval = ret;
 		break;
-*/
-/*	case POWER_SUPPLY_PROP_INPUT_CURRENT_NOW: //undeclared identifier
+
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 		ret = bq25980_get_adc_ibus(bq);
 		if (ret < 0)
 			return ret;
@@ -1235,7 +1242,7 @@ static int bq25980_get_charger_property(struct power_supply *psy,
 		val->intval = ret;
 		//dump_all_reg(bq);
 		break;
-*/
+
 /*	case POWER_SUPPLY_PROP_CHARGING_ENABLED://undeclared identifier
 		ret = regmap_read(bq->regmap, BQ25980_CHRGR_CTRL_2, &chg_ctrl_2);
 		if (ret)
@@ -1296,7 +1303,8 @@ static bool bq25980_state_changed(struct bq25980_device *bq,
 		old_state.tflt != new_state->tflt ||
 		old_state.ce != new_state->ce ||
 		old_state.hiz != new_state->hiz ||
-		old_state.bypass != new_state->bypass);
+		old_state.bypass != new_state->bypass ||
+		old_state.cp_switch != new_state->cp_switch);
 }
 
 static irqreturn_t bq25980_irq_handler_thread(int irq, void *private)
@@ -1369,8 +1377,8 @@ static enum power_supply_property bq25980_power_supply_props[] = {
 //	POWER_SUPPLY_PROP_CHARGING_ENABLED,//undeclared identifier
 //	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 //	POWER_SUPPLY_PROP_CURRENT_NOW,
-	//POWER_SUPPLY_PROP_INPUT_VOLTAGE_SETTLED,//undeclared identifier
-	//POWER_SUPPLY_PROP_INPUT_CURRENT_NOW, //undeclared identifier
+	POWER_SUPPLY_PROP_INPUT_VOLTAGE_LIMIT,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 	//POWER_SUPPLY_PROP_CP_IRQ_STATUS,//undeclared identifier
 	//POWER_SUPPLY_PROP_CHIP_VERSION,
 };
@@ -2116,6 +2124,12 @@ static int bq25980_iio_write_raw(struct iio_dev *indio_dev,
 		bq->fault_status.status = 0;
 		bq->alarm_status.status = 0;
 		break;
+	case PSY_IIO_CP_STATUS1:
+		if (val1 == MMI_DISABLE_ADC)
+			bq25980_set_adc_enable(bq, false);
+		else if (val1 == MMI_ENABLE_ADC)
+			bq25980_set_adc_enable(bq, true);
+		break;
 	default:
 		pr_err("Unsupported [%s] IIO chan %d\n",
 				bq->model_name, chan->channel);
@@ -2191,11 +2205,12 @@ static int bq25980_iio_read_raw(struct iio_dev *indio_dev,
 				mutex_unlock(&bq->lock);
 				power_supply_changed(bq->charger);
 			}
-			*val1 = bq->alarm_status.status | (bq->fault_status.status << 8);
-			pr_err("[%s] get_state fault:0x%02X , alarm:0x%02X\n",
+			*val1 = bq->alarm_status.status | (bq->fault_status.status << 8) | (state.cp_switch << 18);
+			pr_err("[%s] get_state fault:0x%02X , alarm:0x%02X , cp_switch:%d\n",
 					bq->model_name,
 					bq->fault_status.status,
-					bq->alarm_status.status);
+					bq->alarm_status.status,
+					state.cp_switch);
 		}
 		break;
 	case PSY_IIO_CURRENT_NOW:
@@ -2465,7 +2480,7 @@ static int bq25980_probe(struct i2c_client *client,
 
 	bq25980_create_device_node(bq->dev);
 
-	dump_reg(bq,0x00,0x37);
+	//dump_reg(bq,0x00,0x37);
 
 	printk("-------[%s] driver probe success--------\n",bq->model_name);
 	return 0;

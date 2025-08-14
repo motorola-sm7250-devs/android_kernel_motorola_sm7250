@@ -21,6 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/input.h>
 #include <linux/mmi_kernel_common.h>
+#include <linux/mmi_relay.h>
 
 #if defined(CONFIG_PANEL_NOTIFICATIONS)
 
@@ -276,18 +277,20 @@ struct gesture_event_data {
  */
 struct ts_mmi_class_methods {
 	int     (*report_gesture)(struct gesture_event_data *gev);
+	int     (*get_gesture_type)(struct device *dev, unsigned char *gesture_type);
 	int     (*report_palm)(bool value);
 	int     (*get_class_fname)(struct device *dev , const char **fname);
 	int     (*get_supplier)(struct device *dev , const char **sname);
 	int     (*report_touch_event)(struct touch_event_data *tev, struct input_dev *input_dev);
+	int     (*report_liquid_detection_status)(struct device *parent, int status);
 	struct kobject *kobj_notify;
 };
 
 enum ts_mmi_pm_mode {
 	TS_MMI_PM_DEEPSLEEP = 0,
 	TS_MMI_PM_GESTURE,
-	TS_MMI_PM_ACTIVE,
-};
+	TS_MMI_PM_ACTIVE
+	};
 
 enum ts_mmi_panel_event {
 	TS_MMI_EVENT_PRE_DISPLAY_OFF,
@@ -296,6 +299,15 @@ enum ts_mmi_panel_event {
 	TS_MMI_EVENT_DISPLAY_ON,
 	TS_MMI_EVENT_DISPLAY_ON_PREPARE,
 	TS_MMI_EVENT_UNKNOWN
+};
+
+enum ts_mmi_work {
+	TS_MMI_DO_RESUME,
+	TS_MMI_DO_PS,
+	TS_MMI_DO_REFRESH_RATE,
+	TS_MMI_DO_FPS,
+	TS_MMI_TASK_INIT,
+	TS_MMI_DO_LIQUID_DETECTION,
 };
 
 #define TS_MMI_RESET_SOFT	0
@@ -317,6 +329,11 @@ enum ts_mmi_panel_event {
 #define TOUCHSCREEN_MMI_DEFAULT_POISON_TIMEOUT_MS	800
 #define TOUCHSCREEN_MMI_DEFAULT_POISON_TRIGGER_DISTANCE	120
 #define TOUCHSCREEN_MMI_DEFAULT_POISON_DISTANCE	25
+
+#define TS_MMI_GESTURE_ZERO 0x01
+#define TS_MMI_GESTURE_SINGLE 0x02
+#define TS_MMI_GESTURE_DOUBLE 0x04
+#define TS_MMI_GESTURE_PALM 0x08
 
 /**
  * struct touchscreen_mmi_methods - hold vendor provided functions
@@ -374,6 +391,7 @@ enum ts_mmi_panel_event {
 	int	(*update_baseline)(struct device *dev, int enable);
 	int	(*update_fod_mode)(struct device *dev, int enable);
 	int	(*active_region)(struct device *dev, int *region_array);
+	int	(*update_liquid_detect_mode)(struct device *dev, int enable);
 	/* Firmware */
 	int	(*firmware_update)(struct device *dev, char *fwname);
 	int	(*firmware_erase)(struct device *dev);
@@ -405,6 +423,7 @@ struct ts_mmi_dev_pdata {
 	bool		usb_detection;
 	bool		update_refresh_rate;
 	bool		gestures_enabled;
+	bool		cli_gestures_enabled;
 	bool		palm_enabled;
 	bool		fw_load_resume;
 	bool		suppression_ctrl;
@@ -414,6 +433,7 @@ struct ts_mmi_dev_pdata {
 	bool		hold_grip_ctrl;
 	bool		poison_slot_ctrl;
 	bool		active_region_ctrl;
+	bool		support_liquid_detection;
 	int		max_x;
 	int		max_y;
 	int		fod_x;
@@ -422,6 +442,9 @@ struct ts_mmi_dev_pdata {
 	int		reset;
 	const char	*class_entry_name;
 	const char 	*bound_display;
+#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
+	int supported_gesture_type;
+#endif
 };
 
 /**
@@ -446,6 +469,7 @@ struct ts_mmi_dev {
 	struct device		*class_dev;
 	dev_t			class_dev_no;
 	int			forcereflash;
+	unsigned char gesture_mode_type;
 	int			panel_status;
 	struct ts_mmi_dev_pdata	pdata;
 #if defined(CONFIG_DRM_PANEL_NOTIFICATIONS) || defined (CONFIG_DRM_PANEL_EVENT_NOTIFICATIONS)
@@ -480,6 +504,11 @@ struct ts_mmi_dev {
 	bool is_fps_registered;	/* FPS notif registration might be delayed */
 	bool fps_state;
 	bool delay_baseline_update;
+
+	struct notifier_block	lpd_notif;
+	bool is_lpd_registered;	/* LPD notif registration might be delayed */
+	bool lpd_state;
+	int liquid_status;
 
 	/*
 	 * sys entey variable
@@ -556,6 +585,8 @@ extern void ts_mmi_dev_unregister(struct device *parent);
 extern int ts_mmi_parse_dt(struct ts_mmi_dev *touch_cdev, struct device_node *of_node);
 extern int ts_mmi_gesture_init(struct ts_mmi_dev *data);
 extern int ts_mmi_gesture_remove(struct ts_mmi_dev *data);
+extern int ts_mmi_cli_gesture_init(struct ts_mmi_dev *data);
+extern int ts_mmi_cli_gesture_remove(struct ts_mmi_dev *data);
 extern int ts_mmi_palm_init(struct ts_mmi_dev *data);
 extern int ts_mmi_palm_remove(struct ts_mmi_dev *data);
 #ifdef TS_MMI_TOUCH_EDGE_GESTURE

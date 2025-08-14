@@ -69,6 +69,9 @@
 #ifdef FTS_USB_DETECT_EN
 #include <linux/power_supply.h>
 #endif
+#ifdef CONFIG_FTS_LAST_TIME
+#include <linux/ktime.h>
+#endif
 
 /*****************************************************************************
 * Private constant and macro definitions using #define
@@ -121,7 +124,7 @@
 /*
  * For commnication error in PM(deep sleep) state
  */
-#define FTS_PATCH_COMERR_PM                 0
+#define FTS_PATCH_COMERR_PM                 1
 #define FTS_TIMEOUT_COMERR_PM               700
 
 /*****************************************************************************
@@ -139,6 +142,10 @@ struct fts_ts_platform_data {
     u32 irq_gpio_flags;
     u32 reset_gpio;
     u32 reset_gpio_flags;
+#ifdef CONFIG_FTS_VDD_GPIO_CONTROL
+    u32 vdd_gpio;
+    u32 vdd_gpio_flags;
+#endif
     bool have_key;
     u32 key_number;
     u32 keys[FTS_MAX_KEYS];
@@ -149,6 +156,10 @@ struct fts_ts_platform_data {
     u32 x_min;
     u32 y_min;
     u32 max_touch_number;
+    bool pocket_mode_ctrl;
+    bool edge_ctrl;
+    bool interpolation_ctrl;
+    bool report_rate_ctrl;
 };
 
 struct ts_event {
@@ -158,6 +169,13 @@ struct ts_event {
     int flag;   /* touch event flag: 0 -- down; 1-- up; 2 -- contact */
     int id;     /*touch ID */
     int area;
+};
+
+struct fts_mode_info {
+    int pocket_mode;
+    int interpolation;
+    int report_rate_mode;
+    int edge_mode[2];
 };
 
 #ifdef FOCALTECH_PALM_SENSOR_EN
@@ -199,6 +217,7 @@ struct fts_ts_data {
     wait_queue_head_t ts_waitqueue;
     struct ftxxxx_proc proc;
     struct ftxxxx_proc proc_ta;
+    struct ftxxxx_proc proc_raw;
     spinlock_t irq_lock;
     struct mutex report_mutex;
     struct mutex bus_lock;
@@ -207,6 +226,7 @@ struct fts_ts_data {
     int log_level;
     int fw_is_running;      /* confirm fw is running when using spi:default 0 */
     int dummy_byte;
+    int refresh_rate;
 #if defined(CONFIG_PM) && FTS_PATCH_COMERR_PM
     struct completion pm_completion;
     bool pm_suspend;
@@ -264,7 +284,13 @@ struct fts_ts_data {
 
 #ifdef FOCALTECH_SENSOR_EN
     bool wakeable;
+    bool fod_suspended;
+    unsigned char gesture_type;
+    int zerotap_data[1];
+    int zero_enable;
+    unsigned long fod_jiffies;
 #endif
+    u8 gsx_cmd;
 
 #ifdef FOCALTECH_PALM_SENSOR_EN
     bool palm_detection_enabled;
@@ -286,6 +312,12 @@ struct fts_ts_data {
 #if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
     struct ts_mmi_class_methods *imports;
 #endif
+#ifdef CONFIG_FTS_LAST_TIME
+    ktime_t last_event_time;
+#endif
+    struct mutex mode_lock;
+    struct fts_mode_info set_mode;
+    struct fts_mode_info get_mode;
 };
 
 enum _FTS_BUS_TYPE {
@@ -338,6 +370,9 @@ void fts_gesture_recovery(struct fts_ts_data *ts_data);
 int fts_gesture_readdata(struct fts_ts_data *ts_data, u8 *data);
 int fts_gesture_suspend(struct fts_ts_data *ts_data);
 int fts_gesture_resume(struct fts_ts_data *ts_data);
+#ifdef FOCALTECH_SENSOR_EN
+void fts_read_report_fod_event(struct fts_ts_data *ts_data);
+#endif
 
 /* Apk and functions */
 int fts_create_apk_debug_channel(struct fts_ts_data *);
@@ -387,4 +422,7 @@ int fts_ex_mode_recovery(struct fts_ts_data *ts_data);
 void fts_irq_disable(void);
 void fts_irq_enable(void);
 int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable);
+#ifdef FOCALTECH_SENSOR_EN
+bool fts_is_fod_resume(struct fts_ts_data *ts_data);
+#endif
 #endif /* __LINUX_FOCALTECH_CORE_H__ */

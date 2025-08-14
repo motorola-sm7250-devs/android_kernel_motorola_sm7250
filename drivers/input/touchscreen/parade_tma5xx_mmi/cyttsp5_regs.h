@@ -1013,6 +1013,7 @@ struct cyttsp5_core_data {
 	struct notifier_block pm_notifier;
 #endif
 	struct work_struct startup_work;
+	struct work_struct ez_recovery_work;
 	struct cyttsp5_sysinfo sysinfo;
 	void *exclusive_dev;
 	int exclusive_waits;
@@ -1043,6 +1044,7 @@ struct cyttsp5_core_data {
 	struct mutex tthe_lock;
 	u8 tthe_exit;
 #endif
+	struct wakeup_source *gesture_wakelock;
 	enum cyttsp5_pm_mode pm_mode;
 	bool should_enable_gesture;
 #ifdef CYTTSP5_SENSOR_EN

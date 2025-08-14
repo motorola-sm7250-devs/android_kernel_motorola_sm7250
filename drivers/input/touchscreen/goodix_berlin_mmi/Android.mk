@@ -10,7 +10,7 @@ ifeq ($(DRM_PANEL_NOTIFICATIONS),true)
 endif
 
 ifeq ($(TOUCHSCREEN_GOODIX_BRL_SPI),true)
-ifeq ($(call is-board-platform-in-list,taro kalama), true)
+ifeq ($(call is-board-platform-in-list,taro kalama parrot), true)
 	KBUILD_OPTIONS += CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y
 else
 	KERNEL_CFLAGS += CONFIG_TOUCHSCREEN_GOODIX_BRL_SPI=y
@@ -43,6 +43,18 @@ endif
 
 ifeq ($(GTP_ENABLE_DDA_STYLUS),true)
 	KBUILD_OPTIONS += CONFIG_GTP_DDA_STYLUS=y
+endif
+
+ifeq ($(BOARD_USES_DOUBLE_TAP_CTRL),true)
+	KBUILD_OPTIONS += CONFIG_BOARD_USES_DOUBLE_TAP_CTRL=y
+endif
+
+ifneq ($(GTP_ENABLE_TOUCH_PALM),)
+	KBUILD_OPTIONS += CONFIG_INPUT_GOODIX_MMI_ENABLE_PALM=y
+endif
+
+ifeq ($(ENABLE_TP_GHOST_LOG_CAPTURE),true)
+	KBUILD_OPTIONS += CONFIG_GTP_GHOST_LOG_CAPTURE=y
 endif
 
 include $(CLEAR_VARS)

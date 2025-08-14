@@ -26,6 +26,9 @@
 #include <linux/string.h>
 #include <linux/version.h>
 #include <linux/mmi_wake_lock.h>
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
+#include <linux/thermal.h>
 
 #include "mmi_discrete_charger_core.h"
 #include "mmi_discrete_voter.h"
@@ -118,6 +121,7 @@ static int mmi_discrete_parse_dts(struct mmi_discrete_charger *chip)
 		}
 	}
 
+	chip->mosfet_supported = of_property_read_bool(node, "mmi,usb-mosfet-supported");
 	chip->pd_supported = of_property_read_bool(node, "mmi,usb-pd-supported");
 
 	/*mm8013 fg need charging mode info*/
@@ -1076,14 +1080,73 @@ static void mmi_discrete_config_qc_charger(struct mmi_discrete_charger *chg)
 	}
 }
 
+#define WLS_ICL_INCREASE_STEP 100000
+#define WLS_ICL_MIN 500000
+static void mmi_discrete_wireless_icl_work(struct work_struct *work)
+{
+	struct mmi_discrete_charger *chip = container_of(work,
+				struct mmi_discrete_charger,
+				wireless_icl_work.work);
+	int wls_icl = 0;
+	union power_supply_propval wls_output = {0, };
+	int ret = 0;
+
+	wls_icl = get_client_vote(chip->usb_icl_votable, SW_ICL_MAX_VOTER);
+
+	if (wls_icl >= chip->wls_max_icl_ua)//wls icl have been setted
+		return;
+
+	while((wls_icl + WLS_ICL_INCREASE_STEP) <= chip->wls_max_icl_ua) {
+		if(!is_wls_online(chip))
+			return;
+		wls_icl += WLS_ICL_INCREASE_STEP;
+
+		if (wls_icl < WLS_ICL_MIN)
+			wls_icl = WLS_ICL_MIN;
+
+		vote(chip->usb_icl_votable, SW_ICL_MAX_VOTER, true, wls_icl);
+		msleep(500);
+		wls_icl = get_client_vote(chip->usb_icl_votable, SW_ICL_MAX_VOTER);
+		mmi_info(chip, "vote wireless charging icl %d ua\n", wls_icl);
+	}
+
+	if (!chip->wls_psy)
+		return;
+
+	ret = power_supply_get_property(chip->wls_psy,
+				       POWER_SUPPLY_PROP_CURRENT_NOW, &wls_output);
+	if (ret)
+		mmi_err(chip, "Couldn't get wls current now prop rc=%d\n", ret);
+
+	mmi_info(chip, "get wls current now =%d\n", wls_output.intval);
+	if (wls_output.intval >= 500)
+		return;
+
+	wls_icl = 0;
+	while((wls_icl + WLS_ICL_INCREASE_STEP) <= chip->wls_max_icl_ua) {
+		if(!is_wls_online(chip))
+			return;
+		wls_icl += WLS_ICL_INCREASE_STEP;
+
+		vote(chip->usb_icl_votable, SW_ICL_MAX_VOTER, true, wls_icl);
+		msleep(500);
+		wls_icl = get_client_vote(chip->usb_icl_votable, SW_ICL_MAX_VOTER);
+		mmi_info(chip, "vote wireless charging icl %d ua\n", wls_icl);
+	}
+	charger_dev_rerun_aicl(chip->master_chg_dev);
+
+}
+
 /*MIN is 2.5W -> default icl 500mA * input vol 5V*/
 #define WLS_POWER_MIN 2500
 static void mmi_discrete_config_wls_charger(struct mmi_discrete_charger *chg)
 {
 	mmi_dbg(chg, "Configure wireless charger\n");
 
-	if (chg->bc1p2_charger_type != POWER_SUPPLY_TYPE_UNKNOWN)
-		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, true, chg->wls_max_icl_ua);
+	if (chg->bc1p2_charger_type != POWER_SUPPLY_TYPE_UNKNOWN) {
+		cancel_delayed_work(&chg->wireless_icl_work);
+		schedule_delayed_work(&chg->wireless_icl_work, msecs_to_jiffies(0));
+	}
 }
 
 static void mmi_discrete_config_charger_input(struct mmi_discrete_charger *chip)
@@ -1758,6 +1821,120 @@ static int mmi_discrete_init_dc_psy(struct mmi_discrete_charger *chip)
 	return 0;
 }
 
+/*************************
+ * USB   COOLER   START  *
+ *************************/
+static int usb_therm_set_mosfet(struct mmi_discrete_charger *chip,bool enable)
+{
+	int ret = 0;
+
+	/*set typec mosfet output*/
+	if (gpio_is_valid(chip->mos_en_gpio)) {
+		mmi_err(chip, "%s,set mos en: %d.",__func__,enable);
+		if(enable){
+			ret = charger_dev_enable_charging(chip->master_chg_dev,false);
+			ret = charger_dev_enable_hz(chip->master_chg_dev,true);
+			udelay(300);
+			if ((chip->bc1p2_charger_type != POWER_SUPPLY_TYPE_USB)&&
+			    (chip->bc1p2_charger_type !=POWER_SUPPLY_TYPE_USB_CDP)) {
+				gpio_direction_output(chip->mos_en_gpio, enable);
+				mmi_err(chip, "%s,open mos en: %d %d",__func__,enable,ret);
+			}
+		}
+		else{
+			gpio_direction_output(chip->mos_en_gpio, enable);
+			udelay(300);
+			ret = charger_dev_enable_charging(chip->master_chg_dev,true);
+			ret = charger_dev_enable_hz(chip->master_chg_dev,false);
+			mmi_err(chip, "%s,close mos en: %d %d",__func__,enable,ret);
+		}
+	}
+
+	return ret;
+}
+
+static int usb_therm_get_mosfet(struct mmi_discrete_charger *chip)
+{
+	int ret = 0;
+
+	/*get typec mosfet output*/
+	if (gpio_is_valid(chip->mos_en_gpio)) {
+//		mmi_err(chip, "%s,get mos en.",__func__);
+		return gpio_get_value(chip->mos_en_gpio);
+	}
+
+	return ret;
+}
+
+
+static int usb_therm_get_max_state(struct thermal_cooling_device *cdev,
+	unsigned long *state)
+{
+	*state = 1;
+
+	return 0;
+}
+
+static int usb_therm_get_cur_state(struct thermal_cooling_device *cdev,
+	unsigned long *state)
+{
+	struct mmi_discrete_charger *chip = cdev->devdata;
+
+	*state = usb_therm_get_mosfet(chip);
+
+	return 0;
+}
+
+static int usb_therm_set_cur_state(struct thermal_cooling_device *cdev,
+	unsigned long state)
+{
+	struct mmi_discrete_charger *chip = cdev->devdata;
+	if (state) {
+		mmi_info(chip, "Enable typec mosfet.");
+		usb_therm_set_mosfet(chip, true);
+	} else {
+		mmi_info(chip, "Disable typec mosfet.");
+		usb_therm_set_mosfet(chip, false);
+	}
+
+	return 0;
+}
+
+static const struct thermal_cooling_device_ops usb_therm_ops = {
+	.get_max_state = usb_therm_get_max_state,
+	.get_cur_state = usb_therm_get_cur_state,
+	.set_cur_state = usb_therm_set_cur_state,
+};
+
+static int mmi_discrete_init_usb_therm_cooler(struct mmi_discrete_charger *chip)
+{
+	int ret;
+	/* Register thermal zone cooling device */
+	chip->cdev = thermal_of_cooling_device_register(dev_of_node(chip->dev),
+		"usb_therm_cooler", chip, &usb_therm_ops);
+
+	if (IS_ERR(chip->cdev)) {
+		mmi_err(chip, "Cooling register failed for usb_therm, ret:%ld\n",
+			PTR_ERR(chip->cdev));
+		return PTR_ERR(chip->cdev);
+	}
+	mmi_info(chip, "Cooling register success for usb_therm.");
+
+	/*typec mosfet outout en control*/
+	chip->mos_en_gpio = of_get_named_gpio(chip->dev->of_node, "mmi,mos-en-gpio", 0);
+	if (gpio_is_valid(chip->mos_en_gpio))
+	{
+		ret = gpio_request(chip->mos_en_gpio, "mmi mos en pin");
+		if (ret) {
+			mmi_err(chip, "%s: %d gpio(mos en) request failed.", __func__, chip->mos_en_gpio);
+			return ret;
+		}
+
+		gpio_direction_output(chip->mos_en_gpio, 0);//default enable mos charge
+	}
+	return 0;
+}
+
 #if defined(CONFIG_DEBUG_FS)
 static int register_dump_read(struct seq_file *m, void *data)
 {
@@ -1981,8 +2158,9 @@ static void update_sw_icl_max(struct mmi_discrete_charger *chg)
 					SDP_CURRENT_UA);
 		break;
 	case POWER_SUPPLY_TYPE_WIRELESS:
-		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, true,
-					chg->wls_max_icl_ua);
+		cancel_delayed_work(&chg->wireless_icl_work);
+		schedule_delayed_work(&chg->wireless_icl_work,
+					msecs_to_jiffies(0));
 		break;
 	case POWER_SUPPLY_TYPE_UNKNOWN:
 	default:
@@ -2250,6 +2428,8 @@ int mmi_discrete_config_pd_active(struct mmi_discrete_charger *chip, int val)
 		return 0;
 
 	chip->pd_active = val;
+
+	charger_dev_config_pd_active(chip->master_chg_dev, chip->pd_active);
 	update_sw_icl_max(chip);
 
 	if (chip->pd_active) {
@@ -2410,7 +2590,6 @@ static int mmi_discrete_get_chg_info(void *data, struct mmi_charger_info *chg_in
        int rc;
 	int usb_type;
 	int usb_icl;
-	int vbus;
 	union power_supply_propval val;
 	struct mmi_discrete_chg_client *chg = data;
 	struct mmi_discrete_charger *chip = chg->chip;
@@ -2459,15 +2638,8 @@ static int mmi_discrete_get_chg_info(void *data, struct mmi_charger_info *chg_in
 			chip->chg_info.chrg_pmax_mw = 2500;
 
 		usb_icl = get_effective_result(chip->usb_icl_votable);
-		val.intval = 0;
-		rc = get_prop_usb_voltage_now(chip, &val);
-		if (rc < 0)
-			mmi_err(chip, "Couldn't read usb voltage rc=%d\n", rc);
-		vbus = (val.intval /1000 + 500) /1000;
-		if ((usb_type != POWER_SUPPLY_TYPE_USB) && (usb_type != POWER_SUPPLY_TYPE_USB_CDP)) {
-			if (chip->chg_info.chrg_pmax_mw < (usb_icl * vbus / 1000))
-				chip->chg_info.chrg_pmax_mw = usb_icl * vbus / 1000;
-		}
+		if (chip->chg_info.chrg_pmax_mw < (usb_icl * 5 / 1000))
+			chip->chg_info.chrg_pmax_mw = usb_icl * 5 / 1000;
 
 		rc = 0;
 		goto completed;
@@ -2728,8 +2900,10 @@ static int mmi_discrete_charger_init(struct mmi_discrete_charger *chip)
 			pmic_vote_force_active_set(chip->usb_icl_votable, 1);
 		}
 
-		mmi_discrete_create_factory_testcase(chip);
 	}
+
+	/*export charging operation interface for AUTHEN version*/
+	mmi_discrete_create_factory_testcase(chip);
 
 	return 0;
 free_mem:
@@ -3059,6 +3233,7 @@ static int mmi_discrete_probe(struct platform_device *pdev)
 
 	INIT_DELAYED_WORK(&chip->charger_work, mmi_discrete_charger_work);
 	INIT_DELAYED_WORK(&chip->monitor_ibat_work, mmi_discrete_monitor_ibat_work);
+	INIT_DELAYED_WORK(&chip->wireless_icl_work, mmi_discrete_wireless_icl_work);
 
 	chip->batt_psy = devm_power_supply_register(chip->dev,
 						    &batt_psy_desc,
@@ -3094,6 +3269,14 @@ static int mmi_discrete_probe(struct platform_device *pdev)
 		goto cleanup;
 	}
 
+	if(chip->mosfet_supported) {
+		rc = mmi_discrete_init_usb_therm_cooler(chip);
+		if (rc < 0) {
+			mmi_err(chip, "Couldn't initialize usb therm cooler rc=%d.", rc);
+			//goto cleanup;
+		}
+	}
+
 	mmi_discrete_charger_init(chip);
 
 	usb_source_change_notify_handler(&chip->master_chg_nb, 0, &chip->master_chg_dev->noti);
@@ -3116,6 +3299,10 @@ static int mmi_discrete_remove(struct platform_device *pdev)
 
 	cancel_delayed_work(&chip->charger_work);
 	mmi_discrete_charger_deinit(chip);
+
+	/*for usb thermal*/
+	if(chip->mosfet_supported)
+		gpio_free(chip->mos_en_gpio);
 
 	if (chip->mmi_psy)
 		power_supply_put(chip->mmi_psy);

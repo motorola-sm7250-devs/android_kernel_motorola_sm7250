@@ -1239,11 +1239,13 @@ static void goodix_ts_report_finger(struct input_dev *dev,
 				input_sync(dev);
 				input_report_key(dev, BTN_TRIGGER_HAPPY1, 0);
 				input_sync(dev);
-			}else if(ts_event->gesture_type == GOODIX_GESTURE_FOD_UP && touch_num <=0) {
+				ts_info("report BTN_TRIGGER_HAPPY1");
+			}else if(ts_event->gesture_type == GOODIX_GESTURE_FOD_UP) {
 				input_report_key(dev, BTN_TRIGGER_HAPPY2, 1);
 				input_sync(dev);
 				input_report_key(dev, BTN_TRIGGER_HAPPY2, 0);
 				input_sync(dev);
+				ts_info("report BTN_TRIGGER_HAPPY2");
 			}
 		}
 		ts_debug("fod_enable= %d, gesture_type =%x, touch_num= %d", core_data->fod_enable,
@@ -2336,10 +2338,12 @@ static int goodix_later_init_thread(void *data)
 		goto uninit_fw;
 	}
 
+#ifndef CONFIG_INPUT_TOUCHSCREEN_MMI
 	/* the recomend way to update ic config is throuth ISP,
 	 * if not we will send config with interactive mode
 	 */
 	goodix_send_ic_config(cd, CONFIG_TYPE_NORMAL);
+#endif
 
 #ifdef CONFIG_INPUT_TOUCHSCREEN_MMI
 stage2_init:
@@ -2380,6 +2384,19 @@ static int goodix_start_later_init(struct goodix_ts_core *ts_core)
 	}
 	return 0;
 }
+
+#ifdef GOODIX_PALM_SENSOR_EN
+static void goodix_palm_sensor_release_timer_handler(struct timer_list *t)
+{
+	struct goodix_ts_core *cd = from_timer(cd, t, palm_release_timer);
+
+	if (cd->imports && cd->imports->report_palm && atomic_read(&cd->palm_status)) {
+		cd->imports->report_palm(false);
+		ts_info("palm report far");
+		atomic_set(&cd->palm_status, 0);
+	}
+}
+#endif
 
 /**
  * goodix_ts_probe - called by kernel when Goodix touch
@@ -2523,6 +2540,17 @@ static int goodix_ts_probe(struct platform_device *pdev)
 		goto err_register_gesture_wakelock;
 	}
 
+#ifdef GOODIX_PALM_SENSOR_EN
+	timer_setup(&core_data->palm_release_timer, goodix_palm_sensor_release_timer_handler, 0);
+	core_data->palm_release_delay_ms = GOODIX_PALM_RELEASE_DELAY_MS;
+#endif
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+	goodix_log_capture_register_misc();
+	if (ret)
+		ts_err("Failed register log device, %d", ret);
+#endif
+
 	ts_info("goodix_ts_core probe success");
 	return 0;
 
@@ -2554,6 +2582,10 @@ static int goodix_ts_remove(struct platform_device *pdev)
 	goodix_stylus_dda_exit();
 #endif
 	goodix_tools_exit();
+
+#ifdef CONFIG_GTP_GHOST_LOG_CAPTURE
+	goodix_log_capture_unregister_misc();
+#endif
 
 	if (core_data->init_stage >= CORE_INIT_STAGE2) {
 		gesture_module_exit();

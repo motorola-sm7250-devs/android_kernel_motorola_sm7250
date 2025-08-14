@@ -76,8 +76,9 @@
 
 #define CPS4019_CHIP_ID 	0x4019
 #define CPS4019_WORK_VOL 	2700000 //mV
+#define CPS4019_DEFAULT_POWER 	5//5W, unit w
 
-#define CPS4019_PPP_DATA_SIZE 	7
+#define CPS4019_PPP_DATA_SIZE 	8
 
 #define cps_wls_log(num, fmt, args...) \
 	do { \
@@ -139,6 +140,14 @@ struct cps_wls_chrg_chip {
 	const char *main_charger_name;
 	struct charger_device *main_chg_dev;
 
+	bool is_factory_mode;
+	bool is_charger_full;
+
+	int op_mode;
+	int fan_speed;
+	int light_level;
+	int wlc_status;
+
 	/*fw relative*/
 	const char *wls_fw_name;
 	int fw_ver_major;
@@ -165,6 +174,7 @@ typedef enum
 	CPS_REG_ADC_VRECT,
 	CPS_REG_ADC_IOUT,
 	CPS_REG_ADC_DIE_TEMP,
+	CPS_REG_PRO_SET,
 	CPS_REG_PPP_HEADER,
 	CPS_REG_PPP_CMD,
 	CPS_REG_PPP_DATA,
@@ -194,15 +204,53 @@ cps_reg_s cps_reg_cfg[CPS_REG_MAX] = {
 	{CPS_REG_ADC_VRECT,		2,			0x0019},
 	{CPS_REG_ADC_IOUT,		2,			0x001B},
 	{CPS_REG_ADC_DIE_TEMP,		2,			0x001D},
+	{CPS_REG_PRO_SET,		2,			0x0068},
 	{CPS_REG_PPP_HEADER,		2,			0x0025},
 	{CPS_REG_PPP_CMD,		2,			0x0026},
-	{CPS_REG_PPP_DATA,		2,			0x0028}
+	{CPS_REG_PPP_DATA,		2,			0x0027}
 };
+
+typedef enum
+{
+	WLC_DISCONNECTED,
+	WLC_CONNECTED,
+	WLC_TX_TYPE_CHANGED,
+	WLC_TX_POWER_CHANGED,
+}wlc_status;
+
+typedef enum {
+	MMI_WLC_NONE,
+	MMI_WLC_BPP,
+	MMI_WLC_EPP,
+	MMI_WLC_MOTO,
+} mmi_wlc_type;
+
+typedef enum {
+	MMI_DOCK_LIGHT_OFF = 0x10,
+	MMI_DOCK_LIGHT_ON = 0x20,
+	MMI_DOCK_LIGHT_BREATH_2S = 0x30,
+	MMI_DOCK_LIGHT_BREATH_4S = 0x40,
+	MMI_DOCK_LIGHT_DEFAULT = MMI_DOCK_LIGHT_BREATH_4S,
+} mmi_dock_light_ctrl;
+
+/* value = fan speed / 100 */
+typedef enum {
+	MMI_DOCK_FAN_SPEED_OFF= 0,
+	MMI_DOCK_FAN_SPEED_LOW = 20,//2000
+	MMI_DOCK_FAN_SPEED_HIGH = 40,//4000
+	MMI_DOCK_FAN_DEFAULT = MMI_DOCK_FAN_SPEED_HIGH,
+} mmi_dock_fan_speed;
+
+typedef enum {
+	MMI_DOCK_LIGHT_INDEX = 0,
+	MMI_DOCK_FAN_INDEX =1,
+} mmi_dock_light_fan_index;
 
 /*define MMI CMD enum*/
 typedef enum
 {
 	MMI_CMD_CHARGE_FULL,
+	MMI_CMD_FAN_LIGHT,
 	MMI_CMD_MAX
 }mmi_cmd_e;
 
@@ -214,9 +262,12 @@ typedef struct
 	uint32_t	 len;
 }mmi_cmd_s;
 
+#define MMI_WLC_DOCK_CMD_LEN		2
+
 mmi_cmd_s mmi_cmd_cfg[MMI_CMD_MAX] = {
 	/* cmd_header	cmd_cmd		cmd_data	cmd_len	*/
 	{0x5,			0x64, 		{0},			0},//MMI_CMD_CHARGE_FULL
+	{0x38,			0x05, 		{0},			MMI_WLC_DOCK_CMD_LEN},//MMI_CMD_FAN
 };
 
 //-------------------I2C APT start--------------------
@@ -243,6 +294,8 @@ static int cps_wls_get_vout(void);
 static int cps_wls_get_die_tmp(void);
 static int cps_wls_set_rx_vout_target(int value);
 static int cps_wls_set_rx_ocp_threshold(int value);
+
+static int cps_wls_set_status(int status);
 
 static int cps_wls_read_word_addr32(int reg)
 {
@@ -398,7 +451,7 @@ static int cps_wls_send_ppp_cmd(int header, int cmd, int *data, int len)
 	if (len > 0) {
 		cps_reg = (cps_reg_s*)(&cps_reg_cfg[CPS_REG_PPP_DATA]);
 		for(i = 0; i < len; i++) {
-			ret = cps_wls_write_reg(cps_reg->reg_addr, data[i], cps_reg->reg_bytes_len);
+			ret = cps_wls_write_reg(cps_reg->reg_addr + i, data[i], cps_reg->reg_bytes_len);
 			if(ret == CPS_WLS_FAIL)
 				goto send_fail;
 		}
@@ -640,8 +693,6 @@ static int cps_check_power(bool *en)
 
 	power_supply_get_property(chg_psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &data);
 	if (data.intval > CPS4019_WORK_VOL) {
-		cps_wls_log(CPS_LOG_ERR,"%s chg vol %d. Do not need to set power\n",
-				__func__, data.intval);
 		*en = false;
 	} else {
 		*en = true;
@@ -667,8 +718,8 @@ static int cps_set_power(bool en)
 			return CPS_WLS_FAIL;
 		}
 
-		/*wait 50ms for vbus boost stable*/
-		msleep(50);
+		/*wait 150ms for vbus boost stable*/
+		msleep(150);
 
 		if (!en)
 			flag = false;
@@ -848,7 +899,7 @@ static int firmware_load(unsigned char *firmeware, int *firmeware_length)
 	return 0;
 }
 
-static int update_firmware(void)
+static int update_firmware(bool forece)
 {
 	int ret, write_count, k;
 	int bootloader_length, firmware_length;
@@ -866,7 +917,7 @@ static int update_firmware(void)
 	}
 
 	/*Judge fw version(fw.hex file ver > fw in chip) and chip id(active chipid is 0x4019)*/
-	if ( cps_check_chipid() &&
+	if ( !forece && cps_check_chipid() &&
 			!cps_check_fw_ver()) {
 		cps_wls_log(CPS_LOG_ERR, "[%s] fw already exist OR chip do not exist. Skip!!\n", __func__);
 		goto update_fail;
@@ -1251,32 +1302,115 @@ static int cps_wls_set_rx_ocp_threshold(int value)
 	return cps_wls_write_reg(cps_reg->reg_addr, value_temp, (int)cps_reg->reg_bytes_len);
 }
 
+static int cps_wls_get_op_mode(void)
+{
+	cps_reg_s *cps_reg;
+	cps_reg = (cps_reg_s*)(&cps_reg_cfg[CPS_REG_PRO_SET]);
+	return cps_wls_read_reg((int)cps_reg->reg_addr, (int)cps_reg->reg_bytes_len);
+}
+
+static int cps_wls_wlc_update_light_fan(void)
+{
+	mmi_cmd_s* mmi_cmd_p = &mmi_cmd_cfg[MMI_CMD_FAN_LIGHT];
+
+	if (chip->is_factory_mode) {
+		cps_wls_log(CPS_LOG_ERR, "[%s] factory mode, skip\n", __func__);
+		return 0;
+	}
+
+	if (chip->is_charger_full) {
+		mmi_cmd_p->data[MMI_DOCK_LIGHT_INDEX] = MMI_DOCK_LIGHT_ON;
+		mmi_cmd_p->data[MMI_DOCK_FAN_INDEX] = MMI_DOCK_FAN_SPEED_OFF;
+	} else {
+	      if (chip->fan_speed == 0)
+			mmi_cmd_p->data[MMI_DOCK_FAN_INDEX] = MMI_DOCK_FAN_SPEED_LOW;
+		else
+			mmi_cmd_p->data[MMI_DOCK_FAN_INDEX] = MMI_DOCK_FAN_SPEED_HIGH;
+
+
+		if (chip->light_level == 0)
+			mmi_cmd_p->data[MMI_DOCK_LIGHT_INDEX] = MMI_DOCK_LIGHT_OFF;
+		else
+			mmi_cmd_p->data[MMI_DOCK_LIGHT_INDEX] = MMI_DOCK_LIGHT_DEFAULT;
+	}
+
+	cps_wls_send_ppp_cmd(mmi_cmd_p->header,
+			mmi_cmd_p->cmd,
+			mmi_cmd_p->data,
+			mmi_cmd_p->len);
+	cps_wls_log(CPS_LOG_ERR, " CPS_WLS: QI set fan/light, WLS_WLC_FAN_SPEED %d "
+			"CPS_RX_CHRG_FULL %d, WLS_WLC_LIGHT %d",
+			chip->fan_speed, chip->is_charger_full, chip->light_level);
+	cps_wls_log(CPS_LOG_ERR, " CPS_WLS: QI set fan/light, ight 0x%x, fan 0x%x",
+			mmi_cmd_p->data[MMI_DOCK_LIGHT_INDEX], mmi_cmd_p->data[MMI_DOCK_FAN_INDEX]);
+
+	return 0;
+}
+
 static int cps_wls_charger_notify_full(void)
 {
 	mmi_cmd_s* mmi_cmd_p;
 	union power_supply_propval data;
+	bool low_power_flag;
 
 	if (cps_get_power_supply_prop("battery", POWER_SUPPLY_PROP_CAPACITY, &data)) {
 		return CPS_WLS_FAIL;
 	}
 
 	cps_wls_log(CPS_LOG_DEBG, "[%s] soc = %d.\n", __func__, data.intval);
-	if (data.intval != 100)
+	if (data.intval != 100) {
+		chip->is_charger_full = false;
 		return CPS_WLS_FAIL;
+	}
+
+	chip->is_charger_full = true;
+
+	/*get vbus status first*/
+	cps_check_power(&low_power_flag);
+	if (low_power_flag) {
+		cps_wls_set_status(WLC_DISCONNECTED);
+		return CPS_WLS_FAIL;
+	}
 
 	if (!cps_wls_get_vout_state()) {
 		return CPS_WLS_FAIL;
 	}
 
-	mmi_cmd_p = &mmi_cmd_cfg[MMI_CMD_CHARGE_FULL];
-	cps_wls_send_ppp_cmd(mmi_cmd_p->header,
-			mmi_cmd_p->cmd,
-			mmi_cmd_p->data,
-			mmi_cmd_p->len);
+	if (chip->op_mode == MMI_WLC_MOTO) {
+		cps_wls_wlc_update_light_fan();
+	} else {
+		mmi_cmd_p = &mmi_cmd_cfg[MMI_CMD_CHARGE_FULL];
+		cps_wls_send_ppp_cmd(mmi_cmd_p->header,
+				mmi_cmd_p->cmd,
+				mmi_cmd_p->data,
+				mmi_cmd_p->len);
+	}
 
 	return CPS_WLS_SUCCESS;
 }
 
+static int cps_wls_notify_st_changed(void)
+{
+	static int pre_status = -1;
+
+	if (pre_status != chip->wlc_status) {
+		cps_wls_log(CPS_LOG_DEBG,"%s st change  %d -> %d\n",__func__, pre_status, chip->wlc_status);
+		pre_status = chip->wlc_status;
+		sysfs_notify(&chip->wl_psy->dev.parent->kobj, NULL, "wlc_st_changed");
+	}
+
+	return 0;
+}
+
+static int cps_wls_set_status(int status)
+{
+	chip->wlc_status = status;
+	if (status == WLC_DISCONNECTED)
+		chip->op_mode = MMI_WLC_NONE;
+	cps_wls_notify_st_changed();
+
+	return 0;
+}
 //------------------------------IRQ Handler-----------------------------------
 static int cps_wls_set_int_enable(void)
 {
@@ -1316,8 +1450,20 @@ static int cps_wls_irq_process(int int_flag)
 		cps_wls_set_int_enable();
 	}
 	if(int_flag & INT_VOUT_STATE) {
+		cps_wls_set_status(WLC_CONNECTED);
+	}
+
+	/*for 50w dock*/
+	if ((int_flag & INT_HS_OK) || (int_flag & INT_HS_FAIL)) {
+		chip->op_mode = cps_wls_get_op_mode();
+		cps_wls_log(CPS_LOG_DEBG, "[%s] op_mode %d\n", __func__, chip->op_mode);
+		if (chip->op_mode == MMI_WLC_MOTO) {
+			cps_wls_set_status(WLC_TX_TYPE_CHANGED);
+		}
+
 		cps_wls_charger_notify_full();
 	}
+
 	//if(int_flag & INT_DATA_STORE){}
 	//if(int_flag & INT_AC_MIS_DET){}
 
@@ -1377,7 +1523,17 @@ static int cps_wls_chrg_get_property(struct power_supply *psy,
 			enum power_supply_property psp,
 			union power_supply_propval *val)
 {
+	bool low_power_flag;
 	int ret = 0;
+
+	/*get vbus status first*/
+	cps_check_power(&low_power_flag);
+	if (low_power_flag) {
+		cps_wls_set_status(WLC_DISCONNECTED);
+		val->intval = 0;
+		return ret;
+	}
+
 	switch(psp) {
 		case POWER_SUPPLY_PROP_ONLINE:
 		case POWER_SUPPLY_PROP_PRESENT:
@@ -1390,7 +1546,7 @@ static int cps_wls_chrg_get_property(struct power_supply *psy,
 			val->intval = cps_wls_get_vout();
 			break;
 		case POWER_SUPPLY_PROP_CURRENT_NOW:
-			ret = cps_get_power_supply_prop("battery", psp, val);
+			val->intval = cps_wls_get_iout();//cps_get_power_supply_prop("battery", psp, val);
 			break;
 		default:
 			return -EINVAL;
@@ -1468,7 +1624,7 @@ static ssize_t store_update_fw(struct device *dev,
 	tmp = simple_strtoul(buf, NULL, 0);
 	if(tmp != 0) {
 		cps_wls_log(CPS_LOG_DEBG, "[%s] -------start update fw\n", __func__);
-		update_firmware();
+		update_firmware(true);
 	}
 
 	return count;
@@ -1483,7 +1639,7 @@ static ssize_t store_erase_fw(struct device *dev,
 	int tmp;
 
 	/*Only work in factory mode*/
-	if (!mmi_is_factory_mode())
+	if (!chip->is_factory_mode)
 		return count;
 
 	tmp = simple_strtoul(buf, NULL, 0);
@@ -1592,6 +1748,70 @@ static ssize_t store_usb_keep_on(struct device *dev,
 }
 static DEVICE_ATTR(usb_keep_on, 0220, NULL, store_usb_keep_on);
 
+static ssize_t show_wlc_fan_speed(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, " %d\n", chip->fan_speed);
+}
+
+static ssize_t store_wlc_fan_speed(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf,
+			size_t count)
+{
+	if (chip->op_mode != MMI_WLC_MOTO) {
+		cps_wls_log(CPS_LOG_ERR, "[%s] not moto 50w dock %d, skip\n", __func__ , chip->op_mode);
+		return count;
+	}
+
+	chip->fan_speed = simple_strtoul(buf, NULL, 0);
+	cps_wls_wlc_update_light_fan();
+
+	return count;
+}
+static DEVICE_ATTR(wlc_fan_speed, S_IRUGO|S_IWUSR, show_wlc_fan_speed, store_wlc_fan_speed);
+
+static ssize_t show_wlc_light_ctl(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, " %d\n", chip->light_level);
+}
+
+static ssize_t store_wlc_light_ctl(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf,
+			size_t count)
+{
+	if (chip->op_mode != MMI_WLC_MOTO) {
+		cps_wls_log(CPS_LOG_ERR, "[%s] not moto 50w dock %d, skip\n", __func__ , chip->op_mode);
+		return count;
+	}
+
+	chip->light_level = simple_strtoul(buf, NULL, 0);
+	cps_wls_wlc_update_light_fan();
+
+	return count;
+}
+static DEVICE_ATTR(wlc_light_ctl, S_IRUGO|S_IWUSR, show_wlc_light_ctl, store_wlc_light_ctl);
+
+static ssize_t show_wlc_tx_power(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", CPS4019_DEFAULT_POWER);
+}
+static DEVICE_ATTR(wlc_tx_power, 0444, show_wlc_tx_power, NULL);
+
+static ssize_t show_wlc_tx_type(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", chip->op_mode);
+}
+
+static DEVICE_ATTR(wlc_tx_type, 0444, show_wlc_tx_type, NULL);
+
+static ssize_t show_wlc_st_changed(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", chip->wlc_status);
+}
+
+static DEVICE_ATTR(wlc_st_changed, S_IRUGO, show_wlc_st_changed, NULL);
+
 static ssize_t store_ppp_cmd(struct device *dev,
 			struct device_attribute *attr,
 			const char *buf,
@@ -1637,6 +1857,13 @@ static void cps_wls_create_device_node(struct device *dev)
 	device_create_file(dev, &dev_attr_set_ocp_thres);
 
 	device_create_file(dev, &dev_attr_usb_keep_on);
+
+	device_create_file(dev, &dev_attr_wlc_fan_speed);
+	device_create_file(dev, &dev_attr_wlc_light_ctl);
+	device_create_file(dev, &dev_attr_wlc_tx_power);
+	device_create_file(dev, &dev_attr_wlc_tx_type);
+	device_create_file(dev, &dev_attr_wlc_st_changed);
+
 	device_create_file(dev, &dev_attr_ppp_cmd);
 }
 
@@ -1718,7 +1945,6 @@ err_irq_gpio:
 
 	return ret;
 }
-
 
 static void cps_wls_lock_work_init(struct cps_wls_chrg_chip *chip)
 {
@@ -1841,6 +2067,11 @@ static int cps_wls_chrg_probe(struct i2c_client *client,
 	chip->client = client;
 	chip->dev = &client->dev;
 	chip->name = "cps_wls";
+	chip->is_charger_full = false;
+	chip->op_mode = MMI_WLC_NONE;
+	chip->fan_speed = 1;
+	chip->light_level = 1;
+
 	chip->regmap = devm_regmap_init_i2c(client, &cps4019_regmap_config);
 	if (IS_ERR(chip->regmap)) {
 		cps_wls_log(CPS_LOG_ERR, "[%s] Failed to allocate regmap!\n", __func__);
@@ -1886,6 +2117,8 @@ static int cps_wls_chrg_probe(struct i2c_client *client,
 		}
 	}
 
+	chip->is_factory_mode = mmi_is_factory_mode();
+
 	cps_wls_create_device_node(&(client->dev));
 
 	chip->otg_channel = devm_iio_channel_get(chip->dev, "otg_enable");
@@ -1903,7 +2136,7 @@ static int cps_wls_chrg_probe(struct i2c_client *client,
 
 	cps_wls_log(CPS_LOG_DEBG, "[%s] wireless charger addr low probe successful!\n", __func__);
 
-	update_firmware();
+	update_firmware(false);
 
 	if (cps_wls_get_vout_state() &&
 			chip->main_chg_dev) {

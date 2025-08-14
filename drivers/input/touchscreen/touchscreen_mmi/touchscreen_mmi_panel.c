@@ -90,6 +90,11 @@ int ts_mmi_parse_dt(struct ts_mmi_dev *touch_cdev,
 		ppdata->gestures_enabled = true;
 	}
 
+	if (of_property_read_bool(of_node, "mmi,cli-enable-gestures")) {
+		dev_info(DEV_TS, "%s: using enable cli gestures\n", __func__);
+		ppdata->cli_gestures_enabled = true;
+	}
+
 	if (of_property_read_bool(of_node, "mmi,enable-palm")) {
 		dev_info(DEV_TS, "%s: using enable palm\n", __func__);
 		ppdata->palm_enabled = true;
@@ -155,6 +160,18 @@ int ts_mmi_parse_dt(struct ts_mmi_dev *touch_cdev,
 		ppdata->fod_y = coords[1];
 		dev_info(DEV_TS, "%s: get fod_coords property x:%d y:%d\n", __func__,ppdata->fod_x,ppdata->fod_y);
 	}
+
+#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
+	if (!of_property_read_u32(of_node, "mmi,supported_gesture_type", &ppdata->supported_gesture_type))
+		dev_info(DEV_TS, "%s: supported_gesture_type property %02x\n",
+				__func__, ppdata->supported_gesture_type);
+#endif
+
+	if (of_property_read_bool(of_node, "mmi,support-liquid-detection")) {
+		dev_info(DEV_TS, "%s: support liquid detection\n", __func__);
+		ppdata->support_liquid_detection = true;
+	}
+
 	chosen = of_find_node_by_name(NULL, "chosen");
 	if (chosen) {
 		struct device_node *child;
@@ -261,7 +278,7 @@ static int ts_mmi_check_dt(struct ts_mmi_dev *touch_cdev, struct device_node *np
 
 	count = of_count_phandle_with_args(np, "panel", NULL);
 	if (count <= 0) {
-		dev_err(DEV_TS, "%s: find drm_panel count(%d) fail", __func__, count);
+		dev_dbg(DEV_TS, "%s: find drm_panel count(%d) fail", __func__, count);
 		return -ENODEV;
 	}
 
@@ -275,7 +292,7 @@ static int ts_mmi_check_dt(struct ts_mmi_dev *touch_cdev, struct device_node *np
 			return 0;
 		}
 	}
-	dev_err(DEV_TS, "%s: No find drm_panel", __func__);
+	dev_dbg(DEV_TS, "%s: No find drm_panel", __func__);
 	return -ENODEV;
 }
 
@@ -330,7 +347,7 @@ int ts_mmi_check_drm_panel(struct ts_mmi_dev* touch_cdev, struct device_node *of
 
 	ret = ts_mmi_check_dt(touch_cdev, of_node);
 	if (ret) {
-		dev_err(DEV_TS, "%s: parse drm-panel fail\n", __func__);
+		dev_dbg(DEV_TS, "%s: parse drm-panel fail\n", __func__);
 		if (!ts_mmi_check_default_tp(of_node, "qcom,mmi-touch-active"))
 			ret = -EPROBE_DEFER;
 		else

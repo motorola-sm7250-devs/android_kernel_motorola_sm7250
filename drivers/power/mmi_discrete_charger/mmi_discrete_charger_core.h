@@ -93,6 +93,8 @@ struct mmi_discrete_charger {
 	struct delayed_work	monitor_ibat_work;
 	int			bat_ocp_ua;
 
+	struct delayed_work	wireless_icl_work;
+
 	/* extcon for VBUS / ID notification to USB for type-c only */
 	struct extcon_dev	*extcon;
 
@@ -100,6 +102,13 @@ struct mmi_discrete_charger {
 	struct iio_dev		*indio_dev;
 	struct iio_chan_spec	*iio_chan;
 	struct iio_channel	*int_iio_chans;
+
+	/*cooling device*/
+	struct thermal_cooling_device *cdev;
+
+	/*mos output en/dis control*/
+	int			mos_en_gpio;
+	bool			mosfet_supported;
 
 	/*CP*/
 	bool			cp_active;

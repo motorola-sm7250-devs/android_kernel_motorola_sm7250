@@ -49,6 +49,10 @@
 #define TOUCH_INPUT_NAME "synaptics_tcm_touch"
 #define TOUCH_INPUT_PHYS_PATH "synaptics_tcm/touch_input"
 
+#if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
+#include <linux/touchscreen_mmi.h>
+#endif
+
 #define CHAR_DEVICE_NAME "tcm"
 #define CHAR_DEVICE_MODE (0x0600)
 
@@ -60,10 +64,10 @@
 
 #define IS_NOT_FW_MODE(mode) \
         ((mode != MODE_APPLICATION_FIRMWARE) && (mode != MODE_HOSTDOWNLOAD_FIRMWARE))
-
-#define IS_FW_MODE(mode) \
+/*
+#define IS_NOT_FW_MODE(mode) \
         ((mode == MODE_APPLICATION_FIRMWARE) || (mode == MODE_HOSTDOWNLOAD_FIRMWARE))
-
+*/
 /**
  * @section: Driver Configurations
  *
@@ -115,7 +119,7 @@
  * @brief ENABLE_WAKEUP_GESTURE
  *        Open if having wake-up gesture support.
  */
-/* #define ENABLE_WAKEUP_GESTURE */
+#define ENABLE_WAKEUP_GESTURE
 
 /**
  * @brief REPORT_SWAP_XY
@@ -370,6 +374,15 @@ struct syna_tcm {
 	struct syna_tcm_helper helper;
 #endif
 
+#if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
+	struct ts_mmi_class_methods *imports;
+#endif
+
+	/* testing */
+	char *testing_log_data;
+	unsigned int testing_log_size;
+	syna_pal_mutex_t testing_mutex;
+
 	/* Specific function pointer to do device connection.
 	 *
 	 * This function will power on and identify the connected device.
@@ -435,7 +448,7 @@ struct syna_tcm {
  * @brief: Helpers for cdevice nodes and sysfs nodes creation
  *
  * These functions are implemented in syna_touchcom_sysfs.c
- * and available only when HAS_SYSFS_INTERFACE is enabled.
+ * and available only whentesting_ HAS_SYSFS_INTERFACE is enabled.
  */
 #ifdef HAS_SYSFS_INTERFACE
 
@@ -469,4 +482,6 @@ void syna_dev_reflash_startup_work(struct work_struct *work);
 
 int syna_set_fw_name(struct syna_tcm *tcm, char *name);
 int syna_reflash_do_reflash(struct syna_tcm *tcm, char *fwname);
-//int syna_dev_early_suspend(struct device *dev);
+int syna_dev_early_suspend(struct device *dev);
+bool syna_check_panel(struct device_node *np);
+extern bool limit_panel;

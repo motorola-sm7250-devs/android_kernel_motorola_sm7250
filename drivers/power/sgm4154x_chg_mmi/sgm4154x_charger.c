@@ -24,6 +24,51 @@
 #include <uapi/linux/sched/types.h>
 #include <linux/kthread.h>
 
+#ifdef __indicator_led_en__
+static struct sgm4154x_device *sgm_g;
+#define TRILED_NUM_MAX			3
+
+struct pwm_setting {
+	u64	pre_period_ns;
+	u64	period_ns;
+	u64	duty_ns;
+};
+
+struct led_setting {
+	u64			on_ms;
+	u64			off_ms;
+	enum led_brightness	brightness;
+	bool			blink;
+	bool			breath;
+};
+
+struct qpnp_led_dev {
+	struct led_classdev	cdev;
+	struct pwm_device	*pwm_dev;
+	struct pwm_setting	pwm_setting;
+	struct led_setting	led_setting;
+	struct indicator_led_chip	*chip;
+	struct mutex		lock;
+	const char		*label;
+	const char		*default_trigger;
+	u8			id;
+	bool			blinking;
+	bool			breathing;
+};
+
+struct indicator_led_chip {
+	struct device		*dev;
+	struct qpnp_led_dev	*leds;
+	struct nvmem_device	*pbs_nvmem;
+	struct mutex		bus_lock;
+	int			num_leds;
+	u16			reg_base;
+	u8			subtype;
+	u8			bitmap;
+	struct pinctrl *pinctrl;
+	struct pinctrl_state *pin_sta_default;
+};
+#endif
 static struct power_supply_desc sgm4154x_power_supply_desc;
 
 /* SGM4154x REG06 BOOST_LIM[5:4], uV */
@@ -79,8 +124,6 @@ static enum power_supply_usb_type sgm4154x_usb_type[] = {
 	POWER_SUPPLY_USB_TYPE_CDP,
 };
 
-extern bool mmi_is_factory_mode(void);
-
 #define WAIT_I2C_COUNT 50
 #define WAIT_I2C_TIME 10
 int mmi_regmap_update_bits(struct sgm4154x_device *sgm, unsigned int reg,
@@ -88,14 +131,16 @@ int mmi_regmap_update_bits(struct sgm4154x_device *sgm, unsigned int reg,
 {
 	int retry_count = 0;
 
-	while (sgm->sgm4154x_suspend_flag && retry_count < WAIT_I2C_COUNT) {
-		retry_count ++;
-		dev_err(sgm->dev, "wait system resume when I2C write, count %d\n", retry_count);
-		msleep(WAIT_I2C_TIME);
-	}
+	if (!sgm->i2c_err_wa_dis) {
+		while (sgm->sgm4154x_suspend_flag && retry_count < WAIT_I2C_COUNT) {
+			retry_count ++;
+			dev_err(sgm->dev, "wait system resume when I2C write, count %d\n", retry_count);
+			msleep(WAIT_I2C_TIME);
+		}
 
-	if (retry_count >= WAIT_I2C_COUNT)
-		return -EBUSY;
+		if (retry_count >= WAIT_I2C_COUNT)
+			return -EBUSY;
+	}
 
 	return regmap_update_bits(sgm->regmap, reg, mask, val);
 }
@@ -104,14 +149,16 @@ int mmi_regmap_read(struct sgm4154x_device *sgm, unsigned int reg, unsigned int 
 {
 	int retry_count = 0;
 
-	while (sgm->sgm4154x_suspend_flag && retry_count < WAIT_I2C_COUNT) {
-		retry_count ++;
-		dev_err(sgm->dev, "wait system resume when I2C read, count %d\n", retry_count);
-		msleep(WAIT_I2C_TIME);
-	}
+	if (!sgm->i2c_err_wa_dis) {
+		while (sgm->sgm4154x_suspend_flag && retry_count < WAIT_I2C_COUNT) {
+			retry_count ++;
+			dev_err(sgm->dev, "wait system resume when I2C read, count %d\n", retry_count);
+			msleep(WAIT_I2C_TIME);
+		}
 
-	if (retry_count >= WAIT_I2C_COUNT)
-		return -EBUSY;
+		if (retry_count >= WAIT_I2C_COUNT)
+			return -EBUSY;
+	}
 
 	return regmap_read(sgm->regmap, reg, val);
 }
@@ -742,6 +789,12 @@ static int sgm4154x_set_input_curr_lim(struct sgm4154x_device *sgm, int iindpm)
 	int ret;
 	int reg_val = 0;
 
+	/*As sgm41542 ic input current positive error, so limit 100ma for wls attestation*/
+	if (sgm->wls_max_icl && iindpm == sgm->wls_max_icl) {
+		iindpm -= SGM4154x_IINDPM_I_MIN_uA;
+		pr_info("wls_max_icl = %d, iindpm = %d\n",sgm->wls_max_icl, iindpm);
+	}
+
 	if (iindpm < SGM4154x_IINDPM_I_MIN_uA)
 		reg_val = 0;
 	else if (iindpm >= SGM4154x_IINDPM_I_MAX_uA)
@@ -752,6 +805,8 @@ static int sgm4154x_set_input_curr_lim(struct sgm4154x_device *sgm, int iindpm)
 	else if (iindpm >= SGM4154x_IINDPM_I_MIN_uA && iindpm <= 3100000)//default
 		reg_val = (iindpm-SGM4154x_IINDPM_I_MIN_uA) / SGM4154x_IINDPM_STEP_uA;
 	else if (iindpm > 3100000 && iindpm < SGM4154x_IINDPM_I_MAX_uA)
+		reg_val = 0x1E;
+	if(sgm->sgm_18W_iindpm_comp && iindpm == 3000000)
 		reg_val = 0x1E;
 
 #endif
@@ -920,6 +975,17 @@ int sgm4154x_enable_charger(struct sgm4154x_device *sgm)
 
     return ret;
 }
+
+#ifdef __indicator_led_en__
+int sgm4154x_disable_indicator_led(struct sgm4154x_device *sgm)
+{
+    int ret;
+    printk("sgm4154x_disable_indicator_led\n");
+	ret = mmi_regmap_update_bits(sgm, SGM4154x_CHRG_CTRL_0, SGM4154x_VREG_ICHG_MON_MASK, 0x1<<5);//follow stat_set
+	ret = mmi_regmap_update_bits(sgm, SGM4154x_CHRG_CTRL_f, SGM4154x_VREG_STAT_SET_MASK, 0x0<<2);//led off
+    return ret;
+}
+#endif
 
 int sgm4154x_disable_charger(struct sgm4154x_device *sgm)
 {
@@ -1387,7 +1453,7 @@ static int sgm4154x_request_dpdm(struct sgm4154x_device *sgm, bool enable)
 {
 	int rc = 0;
 
-	if(mmi_is_factory_mode() && sgm->ignore_request_dpdm) {
+	if(sgm->ignore_request_dpdm) {
 		dev_err(sgm->dev, "%s ignore_request_dpdm\n", __func__);
 		return rc;
 	}
@@ -1569,6 +1635,8 @@ static void charger_monitor_work_func(struct work_struct *work)
 	/* enable dynamic adjust battery voltage */
 	union power_supply_propval val_battery = {0};
 	int vbat_uv, ibat_ua;
+	/* enable dynamic adjust battery voltage */
+	int soc;
 
 	charge_monitor_work = container_of(work, struct delayed_work, work);
 	if(charge_monitor_work == NULL) {
@@ -1609,6 +1677,25 @@ static void charger_monitor_work_func(struct work_struct *work)
 			dev_err(sgm->dev, "ibat=%duA, cc=%duA,tune=%d\n", ibat_ua, sgm->final_cc,sgm->cv_tune);
 			if ((ibat_ua > 10000 && ibat_ua < (sgm->final_cc - 100000)) || vbat_uv > sgm->final_cv) {
 				sgm4154x_adjust_constant_voltage(sgm, vbat_uv);
+			}
+		}
+	}
+
+	/* enable dynamic adjust vindpm */
+	if(sgm->enable_dynamic_adjust_vindpm){
+		if (!sgm->battery)
+			sgm->battery = power_supply_get_by_name ("battery");
+		if (sgm->battery) {
+			power_supply_get_property(sgm->battery, POWER_SUPPLY_PROP_CAPACITY, &val_battery);
+			soc = val_battery.intval;
+			dev_err(sgm->dev, "soc = %d\n", soc);
+			if(soc > 80 && sgm->vindpm_flag == false){
+				ret = sgm4154x_set_input_volt_lim(sgm, 4700000);
+				sgm->vindpm_flag = true;
+			}
+			if(soc <= 80 && sgm->vindpm_flag){
+				ret = sgm4154x_set_input_volt_lim(sgm, sgm->init_data.vlim);
+				sgm->vindpm_flag = false;
 			}
 		}
 	}
@@ -1693,7 +1780,7 @@ static int sgm4154x_detected_qc3p_hvdcp(struct sgm4154x_device *sgm, int *charge
 		sgm->mmi_qc3p_power = MMI_POWER_SUPPLY_QC3P_NONE;
 		/*do qc3p rerun*/
 		dev_err(sgm->dev, "qc3p voltage is invalid, rerun qc3p detect\n");
-		if (!sgm->mmi_qc3p_rerun_done) {
+		if (!sgm->mmi_qc3p_rerun_done && !sgm->pd_active) {
 			sgm->mmi_qc3p_rerun_done = true;
 			sgm->mmi_qc3p_wa = true;
 			dp_val = 0x0<<3;
@@ -1711,6 +1798,7 @@ static int sgm4154x_detected_qc3p_hvdcp(struct sgm4154x_device *sgm, int *charge
 			msleep(30);//need tunning
 
 			schedule_work(&sgm->rerun_apsd_work);
+			return -1;
 		}
 
 		return 0;
@@ -1765,7 +1853,7 @@ static int sgm4154x_detected_qc3p_hvdcp(struct sgm4154x_device *sgm, int *charge
 	} else {
 		dev_err(sgm->dev, "qc3p power is invalid, rerun qc3p detect\n");
 		//do rerun qc3p
-		if (!sgm->mmi_qc3p_rerun_done) {
+		if (!sgm->mmi_qc3p_rerun_done && !sgm->pd_active) {
 			sgm->mmi_qc3p_rerun_done = true;
 			sgm->mmi_qc3p_wa = true;
 			dp_val = 0x0<<3;
@@ -1783,6 +1871,7 @@ static int sgm4154x_detected_qc3p_hvdcp(struct sgm4154x_device *sgm, int *charge
 			msleep(30);//need tunning
 
 			schedule_work(&sgm->rerun_apsd_work);
+			return -1;
 		}
 
 	}
@@ -1999,7 +2088,7 @@ static int mmi_hvdcp_detect_kthread(void *param)
 			goto out;
 		}
 
-		if (charger_type != POWER_SUPPLY_TYPE_USB_HVDCP)
+		if (charger_type != POWER_SUPPLY_TYPE_USB_HVDCP || sgm->pd_active)
 			goto out;
 
 		//do qc3.0 detected
@@ -2011,7 +2100,7 @@ static int mmi_hvdcp_detect_kthread(void *param)
 
 #ifdef CONFIG_MMI_QC3P_TURBO_CHARGER
 		//do qc3p detected
-		if (charger_type == POWER_SUPPLY_TYPE_USB_HVDCP_3) {
+		if (charger_type == POWER_SUPPLY_TYPE_USB_HVDCP_3 && !sgm->pd_active) {
 			ret = sgm4154x_detected_qc3p_hvdcp(sgm, &charger_type);
 			if (ret) {
 				dev_err(sgm->dev, "Cann't detected qc3p hvdcp\n");
@@ -2046,7 +2135,7 @@ static int mmi_hvdcp_detect_kthread(void *param)
 			}
 #endif
 		sgm4154x_get_usb_present(sgm);
-		if (!sgm->state.vbus_gd)
+		if (!sgm->state.vbus_gd || sgm->pd_active)
 			goto out;
 
 		sgm->real_charger_type = charger_type;
@@ -2070,6 +2159,7 @@ static void mmi_start_hvdcp_detect(struct sgm4154x_device *sgm)
 {
 
 	if (sgm->mmi_qc3_support
+		&& (!sgm->pd_active)
 		&& (sgm->real_charger_type == POWER_SUPPLY_TYPE_USB_DCP
 #ifdef CONFIG_MMI_SGM41513_CHARGER
                 || sgm->real_charger_type == POWER_SUPPLY_TYPE_USB_HVDCP
@@ -2147,6 +2237,8 @@ static bool mmi_start_bc12_charger_type_detect(struct sgm4154x_device *sgm, int 
 
 static void sgm4154x_vbus_remove(struct sgm4154x_device * sgm)
 {
+	/* enable dynamic adjust vindpm */
+	int ret = 0;
 	dev_err(sgm->dev, "Vbus removed, disable charge\n");
 
 #ifdef CONFIG_MMI_QC3P_TURBO_CHARGER
@@ -2162,6 +2254,13 @@ static void sgm4154x_vbus_remove(struct sgm4154x_device * sgm)
 		sgm4154x_set_chrg_adjust_volt(sgm, sgm->final_cv, 0);
 		mmi_regmap_update_bits(sgm, SGM4154x_CHRG_CTRL_f, SGM4154x_VREG_FT_MASK, 0);
 	}
+
+	/* enable dynamic adjust vindpm */
+	if(sgm->enable_dynamic_adjust_vindpm){
+		ret = sgm4154x_set_input_volt_lim(sgm, sgm->init_data.vlim);
+		sgm->vindpm_flag = false;
+	}
+
 	sgm->pulse_cnt = 0;
 	sgm->mmi_qc3p_rerun_done = false;
 	sgm->mmi_qc3p_wa = false;
@@ -2471,6 +2570,11 @@ static int sgm4154x_hw_init(struct sgm4154x_device *sgm)
 	if (ret)
 		goto err_out;
 
+#ifdef __indicator_led_en__
+	ret = sgm4154x_disable_indicator_led(sgm);
+	if (ret)
+		goto err_out;
+#endif
 	dev_notice(sgm->dev, "ichrg_curr:%d prechrg_curr:%d chrg_vol:%d"
 		" term_curr:%d input_curr_lim:%d",
 		bat_info.constant_charge_current_max_ua,
@@ -2499,6 +2603,16 @@ static int sgm4154x_parse_dt(struct sgm4154x_device *sgm)
 	}
 
 	sgm->mmi_qc3_support = of_property_read_bool(sgm->dev->of_node, "mmi,qc3-support");
+
+	ret = device_property_read_u32(sgm->dev,
+				       "mmi,wls-max-icl",
+				       &sgm->wls_max_icl);
+	if (ret)
+		sgm->wls_max_icl = 0;
+
+	dev_info(sgm->dev, "mmi,wls-max-icl = %d\n",sgm->wls_max_icl);
+
+	sgm->i2c_err_wa_dis = of_property_read_bool(sgm->dev->of_node, "mmi,i2c-err-wa-dis");
 
 	#if 0
 	ret = device_property_read_u32(sgm->dev, "watchdog-timer",
@@ -2583,11 +2697,20 @@ static int sgm4154x_parse_dt(struct sgm4154x_device *sgm)
 		gpio_direction_output(sgm->wls_en_gpio, 0);//default enable wls charge
 	}
 
+	/* 18W iindpm comp */
+	sgm->sgm_18W_iindpm_comp = of_property_read_bool(sgm->dev->of_node, "sgm,18w_iindpm_comp");
 	/* sw jeita */
 	sgm->enable_sw_jeita = of_property_read_bool(sgm->dev->of_node, "enable_sw_jeita");
 	/* enable dynamic adjust battery voltage */
 	sgm->enable_dynamic_adjust_batvol = of_property_read_bool(sgm->dev->of_node, "enable_dynamic_adjust_batvol");
 	dev_err(sgm->dev, "%s: enable_dynamic_adjust_batvol = %d \n", __func__, sgm->enable_dynamic_adjust_batvol);
+
+	/* enable dynamic adjust vindpm */
+	sgm->enable_dynamic_adjust_vindpm = of_property_read_bool(sgm->dev->of_node, "enable_dynamic_adjust_vindpm");
+	dev_err(sgm->dev, "%s: enable_dynamic_adjust_vindpm = %d \n", __func__, sgm->enable_dynamic_adjust_vindpm);
+	if(sgm->enable_dynamic_adjust_vindpm){
+		sgm->vindpm_flag = false;
+	}
 
 	if (of_property_read_u32(sgm->dev->of_node, "jeita_temp_above_t4_cv", &val) >= 0)
 		sgm->data.jeita_temp_above_t4_cv = val;
@@ -2820,33 +2943,6 @@ static int sgm4154x_vbus_regulator_register(struct sgm4154x_device *sgm)
 	return ret;
 }
 
-static int sgm4154x_suspend_notifier(struct notifier_block *nb,
-                unsigned long event,
-                void *dummy)
-{
-    struct sgm4154x_device *sgm = container_of(nb, struct sgm4154x_device, pm_nb);
-
-    switch (event) {
-
-    case PM_SUSPEND_PREPARE:
-        pr_err("sgm4154x PM_SUSPEND \n");
-
-        sgm->sgm4154x_suspend_flag = 1;
-
-        return NOTIFY_OK;
-
-    case PM_POST_SUSPEND:
-        pr_err("sgm4154x PM_RESUME \n");
-
-        sgm->sgm4154x_suspend_flag = 0;
-
-        return NOTIFY_OK;
-
-    default:
-        return NOTIFY_DONE;
-    }
-}
-
 static int sgm4154x_hw_chipid_detect(struct sgm4154x_device *sgm)
 {
 	int ret = 0;
@@ -2948,6 +3044,21 @@ static int sgm4154x_enable_charging(struct charger_device *chg_dev, bool enable)
                  enable ? SGM4154x_CHRG_EN : 0);
 
 	pr_info("%s, %s charging %s\n", __func__,
+		enable ? "enable" : "disable",
+		rc ? "failed" : "success");
+
+	return rc;
+}
+
+static int sgm4154x_enable_hz(struct charger_device *chg_dev, bool enable)
+{
+	struct sgm4154x_device *sgm = dev_get_drvdata(&chg_dev->dev);
+	int rc = 0;
+
+	rc = mmi_regmap_update_bits(sgm, SGM4154x_CHRG_CTRL_0, SGM4154x_HIZ_EN,
+                 enable ? SGM4154x_HIZ_EN : 0);
+
+	pr_info("%s, %s hz %s\n", __func__,
 		enable ? "enable" : "disable",
 		rc ? "failed" : "success");
 
@@ -3093,6 +3204,15 @@ static int sgm4154x_get_real_charger_type(struct charger_device *chg_dev, int *c
 	return 0;
 }
 
+static int sgm4154x_config_pd_active(struct charger_device *chg_dev, int val)
+{
+	struct sgm4154x_device *sgm = dev_get_drvdata(&chg_dev->dev);
+
+	sgm->pd_active = val;
+
+	return 0;
+}
+
 static int sgm4154x_dump_registers(struct charger_device *chg_dev, struct seq_file *m)
 {
 	struct sgm4154x_device *sgm = dev_get_drvdata(&chg_dev->dev);
@@ -3124,6 +3244,7 @@ static struct charger_ops sgm4154x_chg_ops = {
 	.enable_otg = sgm4154x_enable_otg,
 	.set_boost_current_limit = sgm4154x_set_boost_current_limit,
 	.enable_charging = sgm4154x_enable_charging,
+	.enable_hz = sgm4154x_enable_hz,
 	.set_charging_current = sgm4154x_set_charging_current,
 	.set_constant_voltage = sgm4154x_set_charging_voltage,
 	.is_charge_halted = sgm4154x_is_charging_halted,
@@ -3132,7 +3253,167 @@ static struct charger_ops sgm4154x_chg_ops = {
 	.is_enabled_charging = sgm4154x_is_enabled_charging,
 	.enable_termination = sgm4154x_enable_termination,
 	.get_qc3p_power = sgm4154x_get_qc3p_power,
+	.config_pd_active = sgm4154x_config_pd_active,
 };
+#ifdef __indicator_led_en__
+static int indicator_led_set_brightness(struct led_classdev *led_cdev,
+		enum led_brightness brightness)
+{
+	struct qpnp_led_dev *led =
+		container_of(led_cdev, struct qpnp_led_dev, cdev);
+	int rc = 0;
+
+	mutex_lock(&led->lock);
+	if (brightness > LED_FULL)
+		brightness = LED_FULL;
+
+	if (brightness == led->led_setting.brightness &&
+			!led->blinking && !led->breathing) {
+		mutex_unlock(&led->lock);
+		return 0;
+	}
+
+	led->led_setting.brightness = brightness;
+	if (!!brightness)
+		mmi_regmap_update_bits(sgm_g, SGM4154x_CHRG_CTRL_f, SGM4154x_VREG_STAT_SET_MASK, 0x1<<2);
+	else
+		mmi_regmap_update_bits(sgm_g, SGM4154x_CHRG_CTRL_f, SGM4154x_VREG_STAT_SET_MASK, 0x0<<2);
+	led->led_setting.blink = false;
+	led->led_setting.breath = false;
+
+	mutex_unlock(&led->lock);
+
+	return rc;
+}
+
+static enum led_brightness indicator_led_get_brightness(
+			struct led_classdev *led_cdev)
+{
+	return led_cdev->brightness;
+}
+
+static int indicator_led_set_blink(struct led_classdev *led_cdev,
+		unsigned long *on_ms, unsigned long *off_ms)
+{
+	int rc = 0;
+	return rc;
+}
+
+static int indicator_led_register(struct indicator_led_chip *chip)
+{
+	struct qpnp_led_dev *led;
+	int rc, i, j;
+
+
+	for (i = 0; i < chip->num_leds; i++) {
+		led = &chip->leds[i];
+		mutex_init(&led->lock);
+		led->cdev.name = led->label;
+		led->cdev.max_brightness = LED_FULL;
+		led->cdev.brightness_set_blocking = indicator_led_set_brightness;
+		led->cdev.brightness_get = indicator_led_get_brightness;
+		led->cdev.blink_set = indicator_led_set_blink;
+		led->cdev.default_trigger = led->default_trigger;
+		led->cdev.brightness = LED_OFF;
+
+		rc = devm_led_classdev_register(chip->dev, &led->cdev);
+		if (rc < 0) {
+			dev_err(chip->dev, "%s led class device registering failed, rc=%d\n",
+							led->label, rc);
+			goto err_out;
+		}
+	}
+
+	return 0;
+
+err_out:
+	for (j = 0; j <= i; j++) {
+		mutex_destroy(&chip->leds[j].lock);
+	}
+	return rc;
+}
+
+static int indicator_led_parse_dt(struct indicator_led_chip *chip)
+{
+	struct device_node *node = chip->dev->of_node, *child_node;
+	struct qpnp_led_dev *led;
+	int rc = 0, id, i = 0;
+
+	chip->num_leds = of_get_available_child_count(node);
+	if (chip->num_leds == 0) {
+		dev_err(chip->dev, "No led child node defined\n");
+		return -ENODEV;
+	}
+
+	if (chip->num_leds > TRILED_NUM_MAX) {
+		dev_err(chip->dev, "can't support %d leds(max %d)\n",
+				chip->num_leds, TRILED_NUM_MAX);
+		return -EINVAL;
+	}
+
+	chip->leds = devm_kcalloc(chip->dev, chip->num_leds,
+			sizeof(struct qpnp_led_dev), GFP_KERNEL);
+	if (!chip->leds)
+		return -ENOMEM;
+
+	for_each_available_child_of_node(node, child_node) {
+		rc = of_property_read_u32(child_node, "led-sources", &id);
+		if (rc) {
+			dev_err(chip->dev, "Get led-sources failed, rc=%d\n",
+							rc);
+			return rc;
+		}
+
+		if (id >= TRILED_NUM_MAX) {
+			dev_err(chip->dev, "only support 0~%d current source\n",
+					TRILED_NUM_MAX - 1);
+			return -EINVAL;
+		}
+
+		led = &chip->leds[i++];
+		led->chip = chip;
+		led->id = id;
+		led->label =
+			of_get_property(child_node, "label", NULL) ? :
+							child_node->name;
+		led->default_trigger = of_get_property(child_node,
+				"linux,default-trigger", NULL);
+	}
+
+	return rc;
+}
+
+static int indicator_led_probe(struct i2c_client *client)//(struct platform_device *pdev)
+{
+	struct indicator_led_chip *chip;
+	int rc = 0;
+
+	chip = devm_kzalloc(&client->dev, sizeof(*chip), GFP_KERNEL);
+	if (!chip)
+		return -ENOMEM;
+
+	chip->dev = &client->dev;
+
+	rc = indicator_led_parse_dt(chip);
+	if (rc < 0) {
+		if (rc != -EPROBE_DEFER)
+			dev_err(chip->dev, "Devicetree properties parsing failed, rc=%d\n",
+								rc);
+		return rc;
+	}
+	rc = indicator_led_register(chip);
+	if (rc < 0) {
+		dev_err(chip->dev, "Registering LED class devices failed, rc=%d\n",
+								rc);
+		goto destroy;
+	}
+
+	dev_err(chip->dev, "%s has been finished\n", __func__);
+	return 0;
+destroy:
+	return rc;
+}
+#endif
 
 static int sgm4154x_probe(struct i2c_client *client,
 			 const struct i2c_device_id *id)
@@ -3146,7 +3427,9 @@ static int sgm4154x_probe(struct i2c_client *client,
 	sgm = devm_kzalloc(dev, sizeof(*sgm), GFP_KERNEL);
 	if (!sgm)
 		return -ENOMEM;
-
+#ifdef __indicator_led_en__
+	sgm_g = sgm;
+#endif
 	sgm->client = client;
 	sgm->dev = dev;
 
@@ -3244,9 +3527,6 @@ static int sgm4154x_probe(struct i2c_client *client,
 	//rerun apsd and trigger charger detect when boot with charger
 	schedule_work(&sgm->rerun_apsd_work);
 
-	sgm->pm_nb.notifier_call = sgm4154x_suspend_notifier;
-	register_pm_notifier(&sgm->pm_nb);
-
 	ret = sgm4154x_power_supply_init(sgm, dev);
 	if (ret) {
 		dev_err(dev, "Failed to register power supply\n");
@@ -3275,7 +3555,9 @@ static int sgm4154x_probe(struct i2c_client *client,
 #endif
 
 	schedule_delayed_work(&sgm->charge_monitor_work,100);
-
+#ifdef __indicator_led_en__
+	indicator_led_probe(client);
+#endif
 	dev_info(dev, "SGM4154x prob successfully.\n");
 	return ret;
 error_out:
@@ -3325,6 +3607,33 @@ static void sgm4154x_charger_shutdown(struct i2c_client *client)
     pr_info("sgm4154x_charger_shutdown\n");
 }
 
+static int sgm4154x_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct sgm4154x_device *sgm = i2c_get_clientdata(client);
+
+	sgm->sgm4154x_suspend_flag = 1;
+	pr_info("sgm4154x PM_SUSPEND \n");
+
+	return 0;
+}
+
+static int sgm4154x_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct sgm4154x_device *sgm = i2c_get_clientdata(client);
+
+	sgm->sgm4154x_suspend_flag = 0;
+	pr_info("sgm4154x PM_RESUME \n");
+
+	return 0;
+}
+
+static const struct dev_pm_ops sgm4154x_pm_ops = {
+	.resume		= sgm4154x_resume,
+	.suspend		= sgm4154x_suspend,
+};
+
 static const struct i2c_device_id sgm4154x_i2c_ids[] = {
 	{ "sgm41541", 0 },
 	{ "sgm41542", 0 },
@@ -3351,6 +3660,7 @@ static struct i2c_driver sgm4154x_driver = {
 	.driver = {
 		.name = "sgm4154x-charger",
 		.of_match_table = sgm4154x_of_match,
+		.pm	= &sgm4154x_pm_ops,
 	},
 	.probe = sgm4154x_probe,
 	.remove = sgm4154x_charger_remove,

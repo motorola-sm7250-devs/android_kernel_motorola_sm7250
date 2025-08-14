@@ -80,6 +80,12 @@ enum touch_state {
 *****************************************************************************/
 struct fts_ts_data *fts_data;
 
+bool dbg_level_en = 0;
+
+#ifdef FTS_LAST_TIME_EN
+static bool time_flag = 1;
+#endif
+
 /*****************************************************************************
 * Static function prototypes
 *****************************************************************************/
@@ -502,6 +508,9 @@ static int fts_input_report_b(struct fts_ts_data *ts_data, struct ts_event *even
     u32 max_touch_num = ts_data->pdata->max_touch_number;
     bool touch_event_coordinate = false;
     struct input_dev *input_dev = ts_data->input_dev;
+#ifdef FTS_LAST_TIME_EN
+    bool b_touch_down = 0;
+#endif
 
     for (i = 0; i < ts_data->touch_event_num; i++) {
         if (fts_input_report_key(ts_data, &events[i]) == 0) {
@@ -522,8 +531,14 @@ static int fts_input_report_b(struct fts_ts_data *ts_data, struct ts_event *even
             touch_down_point_cur |= (1 << events[i].id);
             touch_point_pre |= (1 << events[i].id);
 
+#ifdef FTS_LAST_TIME_EN
+            if (FTS_TOUCH_DOWN == events[i].flag) {
+                b_touch_down = 1;
+            }
+#endif
+
             if ((ts_data->log_level >= 2) ||
-                ((1 == ts_data->log_level) && (FTS_TOUCH_DOWN == events[i].flag))) {
+                (dbg_level_en && (FTS_TOUCH_DOWN == events[i].flag))) {
                 FTS_DEBUG("[B]P%d(%d, %d)[p:%d,tm:%d] DOWN!",
                           events[i].id, events[i].x, events[i].y,
                           events[i].p, events[i].area);
@@ -532,14 +547,14 @@ static int fts_input_report_b(struct fts_ts_data *ts_data, struct ts_event *even
             input_mt_slot(input_dev, events[i].id);
             input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, false);
             touch_point_pre &= ~(1 << events[i].id);
-            if (ts_data->log_level >= 1) FTS_DEBUG("[B]P%d UP!", events[i].id);
+            FTS_DBG_LEVEL("[B]P%d UP!", events[i].id);
         }
     }
 
     if (unlikely(touch_point_pre ^ touch_down_point_cur)) {
         for (i = 0; i < max_touch_num; i++)  {
             if ((1 << i) & (touch_point_pre ^ touch_down_point_cur)) {
-                if (ts_data->log_level >= 1) FTS_DEBUG("[B]P%d UP!", i);
+                FTS_DBG_LEVEL("[B]P%d UP!", i);
                 input_mt_slot(input_dev, i);
                 input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, false);
             }
@@ -549,10 +564,24 @@ static int fts_input_report_b(struct fts_ts_data *ts_data, struct ts_event *even
     if (touch_down_point_cur)
         input_report_key(input_dev, BTN_TOUCH, 1);
     else if (touch_event_coordinate || ts_data->touch_points) {
-        if (ts_data->touch_points && (ts_data->log_level >= 1))
+        if (ts_data->touch_points && dbg_level_en)
             FTS_DEBUG("[B]Points All Up!");
         input_report_key(input_dev, BTN_TOUCH, 0);
+#ifdef FTS_LAST_TIME_EN
+        //enable time_flag when touch All Up for next touch session
+        time_flag = 1;
+#endif
     }
+
+#ifdef FTS_LAST_TIME_EN
+    //check b_touch_down && time_flag to get boot time only once in one touch session,
+    //to avoid impact touch performance for multi touch & moving cases
+    if (b_touch_down && time_flag) {
+        ts_data->last_event_time = ktime_get_boottime();
+        time_flag = 0;
+        //FTS_DEBUG("time_flag, save last_event_time when touch Down");
+    }
+#endif
 
     ts_data->touch_points = touch_down_point_cur;
     input_sync(input_dev);
@@ -1164,10 +1193,6 @@ static int fts_buffer_init(struct fts_ts_data *ts_data)
     return 0;
 }
 
-#if FTS_POWER_SOURCE_CUST_EN
-/*****************************************************************************
-* Power Control
-*****************************************************************************/
 #if FTS_PINCTRL_EN
 static int fts_pinctrl_init(struct fts_ts_data *ts)
 {
@@ -1260,6 +1285,10 @@ static int fts_pinctrl_select_release(struct fts_ts_data *ts)
 }
 #endif /* FTS_PINCTRL_EN */
 
+/*****************************************************************************
+* Power Control
+*****************************************************************************/
+#if FTS_POWER_SOURCE_CUST_EN
 static int fts_power_source_ctrl(struct fts_ts_data *ts_data, int enable)
 {
     int ret = 0;
@@ -1667,7 +1696,7 @@ static int drm_notifier_callback(struct notifier_block *self,
     }
 
     blank = evdata->data;
-    FTS_INFO("DRM event:%lu,blank:%d", event, *blank);
+    FTS_DBG_LEVEL("DRM event:%lu,blank:%d", event, *blank);
     switch (*blank) {
     case DRM_PANEL_BLANK_UNBLANK:
         if (DRM_PANEL_EARLY_EVENT_BLANK == event) {
@@ -1869,6 +1898,17 @@ static int fts_charger_notifier_callback(struct notifier_block *nb,
 			} else {
 				ts->usb_detect_flag = prop.intval;
 				//FTS_ERROR("usb prop.intval =%d\n", prop.intval);
+				if(ts->usb_detect_flag != ts->usb_connected){
+					if (ts->usb_detect_flag) {
+						ts->usb_connected = 0x01;
+					} else {
+						ts->usb_connected = 0x00;
+					}
+					if(!ts->suspended){
+						fts_mcu_usb_detect_set(ts->usb_connected);
+						FTS_INFO("%s: Cable status change: 0x%2.2X\n", __func__, ts->usb_connected);
+					}
+				}
 			}
 		}
 	}
@@ -1958,6 +1998,11 @@ static int fts_ts_probe_entry(struct fts_ts_data *ts_data)
         FTS_ERROR("fail to get power(regulator)");
         goto err_power_init;
     }
+#endif
+
+#if FTS_PINCTRL_EN && (!FTS_POWER_SOURCE_CUST_EN)
+    fts_pinctrl_init(ts_data);
+    fts_pinctrl_select_normal(ts_data);
 #endif
 
 #if (!FTS_CHIP_IDC)
@@ -2084,6 +2129,11 @@ err_irq_req:
 err_power_init:
     fts_power_source_exit(ts_data);
 #endif
+
+#if FTS_PINCTRL_EN && (!FTS_POWER_SOURCE_CUST_EN)
+    fts_pinctrl_select_release(ts_data);
+#endif
+
     if (gpio_is_valid(ts_data->pdata->reset_gpio))
         gpio_free(ts_data->pdata->reset_gpio);
     if (gpio_is_valid(ts_data->pdata->irq_gpio))
@@ -2173,6 +2223,10 @@ static int fts_ts_remove_entry(struct fts_ts_data *ts_data)
     fts_power_source_exit(ts_data);
 #endif
 
+#if FTS_PINCTRL_EN && (!FTS_POWER_SOURCE_CUST_EN)
+    fts_pinctrl_select_release(ts_data);
+#endif
+
     kfree_safe(ts_data->touch_buf);
     kfree_safe(ts_data->pdata);
     kfree_safe(ts_data);
@@ -2247,6 +2301,9 @@ static int fts_ts_suspend(struct device *dev)
 #endif
     }
 
+#if FTS_PINCTRL_EN && (!FTS_POWER_SOURCE_CUST_EN)
+    fts_pinctrl_select_suspend(ts_data);
+#endif
     fts_release_all_finger();
     ts_data->suspended = true;
     FTS_FUNC_EXIT();
@@ -2283,6 +2340,11 @@ static int fts_ts_resume(struct device *dev)
 #endif
         fts_reset_proc(200);
     }
+
+
+#if FTS_PINCTRL_EN && (!FTS_POWER_SOURCE_CUST_EN)
+    fts_pinctrl_select_normal(ts_data);
+#endif
 
     fts_wait_tp_to_valid();
     fts_ex_mode_recovery(ts_data);
@@ -2442,6 +2504,9 @@ static void __exit fts_ts_exit(void)
 module_init(fts_ts_init);
 module_exit(fts_ts_exit);
 
+#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
 MODULE_AUTHOR("FocalTech Driver Team");
 MODULE_DESCRIPTION("FocalTech Touchscreen Driver");
 MODULE_LICENSE("GPL v2");

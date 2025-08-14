@@ -351,7 +351,7 @@ static int syna_ts_mmi_pre_resume(struct device *dev)
 	if (!tcm) {
 		return -ENODEV;
 	}
-	if (tcm->pwr_state)
+	if (!tcm->pwr_state)
 	{
 		return 0;
 	}
@@ -375,6 +375,8 @@ static int syna_ts_mmi_post_suspend(struct device *dev)
 	struct syna_tcm *tcm;
 	struct platform_device *pdev = dev_get_drvdata(dev);
 
+	LOGI("post_suspend enter\n");
+
 	if (!pdev) {
 		LOGE("Failed to get platform device");
 		return -ENODEV;
@@ -389,9 +391,8 @@ static int syna_ts_mmi_post_suspend(struct device *dev)
 		return 0;
 	}
 
-	tcm->dev_suspend(&tcm->pdev->dev);
+	LOGI("post_suspend exit\n");
 
-	tcm->pwr_state = false;
 	return 0;
 }
 
@@ -399,7 +400,8 @@ static int syna_ts_mmi_pre_suspend(struct device *dev)
 {
 	struct syna_tcm *tcm;
 	struct platform_device *pdev = dev_get_drvdata(dev);
-//	int retval = 0;
+
+	LOGI("pre_suspend enter\n");
 
 	if (!pdev) {
 		LOGE("Failed to get platform device");
@@ -413,11 +415,91 @@ static int syna_ts_mmi_pre_suspend(struct device *dev)
 	if (!tcm->pwr_state)
 		return 0;
 
-//	retval = syna_dev_early_suspend(&tcm->pdev->dev);
-//	if (retval < 0)
-//		LOGE("early suspend fail");
+	LOGI("pre_suspend exit\n");
+
 	return 0;
 }
+
+static int syna_ts_mmi_panel_state(struct device *dev,
+	enum ts_mmi_pm_mode from, enum ts_mmi_pm_mode to)
+{
+	struct syna_tcm *tcm;
+	struct platform_device *pdev = dev_get_drvdata(dev);
+	int retval = 0;
+	if (!pdev) {
+		LOGE("Failed to get platform device");
+		return -ENODEV;
+	}
+	tcm = platform_get_drvdata(pdev);
+	if (!tcm) {
+		LOGE("Failed to get driver data");
+		return -ENODEV;
+	}
+	switch (to) {
+		case TS_MMI_PM_DEEPSLEEP:
+			tcm->lpwg_enabled = false;
+			retval = syna_dev_early_suspend(&tcm->pdev->dev);
+			if (retval < 0) {
+				LOGE("early suspend fail");
+			}
+			tcm->dev_suspend(&tcm->pdev->dev);
+			break;
+		case TS_MMI_PM_GESTURE:
+			tcm->lpwg_enabled = true;
+			tcm->dev_suspend(&tcm->pdev->dev);
+			break;
+		case TS_MMI_PM_ACTIVE:
+			break;
+		default:
+			LOGI("panel mode %d is invalid.\n",to);
+			return -EINVAL;
+	}
+	return 0;
+};
+static int syna_ts_mmi_charger_mode(struct device *dev, int mode)
+{
+	struct syna_tcm *tcm;
+	struct platform_device *pdev = dev_get_drvdata(dev);
+	unsigned short cval = 0;
+	int retval = 0;
+	struct syna_hw_attn_data *attn;
+
+	if (!pdev) {
+		LOGE("Failed to get platform device");
+		return -ENODEV;
+	}
+
+	tcm = platform_get_drvdata(pdev);
+	if (!tcm) {
+		LOGE("Failed to get driver data");
+		return -ENODEV;
+	}
+	attn = &tcm->hw_if->bdata_attn;
+	if(attn->irq_enabled == false) {
+		LOGI("Interrupt is closed, so cannot access CHARGER_CONNECTED\n");
+		return -EINVAL;
+	}
+
+	retval = syna_tcm_get_dynamic_config(tcm->tcm_dev,DC_ENABLE_CHARGER_CONNECTED,&cval,RESP_IN_ATTN);
+	if(retval < 0) {
+		LOGE("Failed to get charger_connected mode\n");
+		goto exit;
+	}
+	if(cval != mode){
+		retval = syna_tcm_set_dynamic_config(tcm->tcm_dev,DC_ENABLE_CHARGER_CONNECTED,mode,RESP_IN_ATTN);
+		if (retval < 0) {
+			LOGE("Failed to set charger_connected mode\n");
+			goto exit;
+		}
+		LOGI("%s: charger mode success %d\n",__func__,cval);
+	} else {
+		LOGI("%s: charger mode already %d\n",__func__,cval);
+	}
+exit:
+
+	return 0;
+};
+
 
 static struct ts_mmi_methods syna_ts_mmi_methods = {
 	.get_vendor = syna_ts_mmi_methods_get_vendor,
@@ -433,9 +515,11 @@ static struct ts_mmi_methods syna_ts_mmi_methods = {
 	.reset =  syna_ts_mmi_methods_reset,
 	.drv_irq = syna_ts_mmi_methods_drv_irq,
 	.power = syna_ts_mmi_methods_power,
+	.charger_mode = syna_ts_mmi_charger_mode,
 	/* Firmware */
 	.firmware_update = syna_ts_firmware_update,
 	/* PM callback */
+	.panel_state = syna_ts_mmi_panel_state,
 	.pre_resume = syna_ts_mmi_pre_resume,
 	.pre_suspend = syna_ts_mmi_pre_suspend,
 	.post_suspend = syna_ts_mmi_post_suspend,
@@ -448,6 +532,8 @@ int syna_ts_mmi_dev_register(struct syna_tcm *tcm) {
 		LOGE("Failed to register ts mmi ret = %d\n", ret);
 		return ret;
 	}
+	/* initialize class imported methods */
+	tcm->imports = &syna_ts_mmi_methods.exports;
 	return 0;
 }
 

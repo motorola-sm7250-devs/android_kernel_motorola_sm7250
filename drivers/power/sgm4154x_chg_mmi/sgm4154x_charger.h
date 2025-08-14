@@ -8,6 +8,14 @@
 #include <linux/i2c.h>
 #include <linux/iio/consumer.h>
 #include <linux/mmi_discrete_power_supply.h>
+#ifdef CONFIG_MMI_EXT_CHG_LED
+#define __indicator_led_en__
+#endif
+
+#ifdef __indicator_led_en__
+#include <linux/leds.h>
+#include <linux/pwm.h>
+#endif
 
 #define SGM4154x_MANUFACTURER	"Texas Instruments"
 #define SGM4154X_STATUS_PLUGIN			0x0001
@@ -174,6 +182,13 @@
 #define SGM4154x_VREG_V_DEF_uV	    4208000
 #define SGM4154x_VREG_V_STEP_uV	    32000
 
+#ifdef __indicator_led_en__
+/* REG00 */
+#define SGM4154x_VREG_ICHG_MON_MASK	     GENMASK(6, 5)
+/* REG0F */
+#define SGM4154x_VREG_STAT_SET_MASK	     GENMASK(3, 2)
+#endif
+
 /* VREG Fine Tuning  */
 #define SGM4154x_VREG_FT_MASK	     GENMASK(7, 6)
 #define SGM4154x_VREG_FT_UP_8mV	     BIT(6)
@@ -336,7 +351,7 @@ struct sgm4154x_device {
 
 	struct work_struct charge_detect_work;
 	struct delayed_work charge_monitor_work;
-	struct notifier_block pm_nb;
+
 	bool sgm4154x_suspend_flag;
 
 	struct wakeup_source *charger_wakelock;
@@ -348,6 +363,10 @@ struct sgm4154x_device {
 	int			final_cc;
 	int			final_cv;
 	int			cv_tune;
+
+	/* enable dynamic adjust vindpm */
+	bool enable_dynamic_adjust_vindpm;
+	bool			vindpm_flag;
 
 	struct regulator	*dpdm_reg;
 	struct regulator	*otg_vbus_reg;
@@ -373,6 +392,9 @@ struct sgm4154x_device {
 	bool			mmi_qc3p_wa;
 	int			mmi_qc3p_power;
 
+	/*mmi PD*/
+	int			pd_active;
+
 	struct sgm4154x_iio		iio;
 #ifdef CONFIG_MMI_QC3P_WT6670_DETECTED
 	struct iio_channel	**ext_iio_chans;
@@ -380,6 +402,10 @@ struct sgm4154x_device {
 
 	/*wls output en/dis control*/
 	int			wls_en_gpio;
+	int			wls_max_icl;
+
+	bool			i2c_err_wa_dis;
+	bool			sgm_18W_iindpm_comp;
 };
 
 #ifdef CONFIG_MMI_QC3P_WT6670_DETECTED

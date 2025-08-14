@@ -73,6 +73,9 @@
 #ifdef FOCALTECH_CONFIG_PANEL_NOTIFICATIONS
 #include <linux/panel_notifier.h>
 #endif
+#ifdef FTS_LAST_TIME_EN
+#include <linux/ktime.h>
+#endif
 
 /*****************************************************************************
 * Private constant and macro definitions using #define
@@ -283,7 +286,23 @@ struct fts_ts_data {
 	uint8_t usb_connected;
 	struct notifier_block charger_notif;
 #endif
+
+#ifdef FTS_LAST_TIME_EN
+	ktime_t last_event_time;
+#endif
 };
+
+#ifdef FTS_SET_TOUCH_STATE
+enum touch_panel_id {
+        TOUCH_PANEL_IDX_PRIMARY = 0,
+        TOUCH_PANEL_MAX_IDX,
+};
+
+enum touch_state {
+        TOUCH_DEEP_SLEEP_STATE = 0,
+        TOUCH_LOW_POWER_STATE,
+};
+#endif
 
 enum _FTS_BUS_TYPE {
     BUS_TYPE_NONE,
@@ -354,6 +373,11 @@ void fts_esdcheck_switch(struct fts_ts_data *ts_data, bool enable);
 void fts_esdcheck_proc_busy(struct fts_ts_data *ts_data, bool proc_debug);
 void fts_esdcheck_suspend(struct fts_ts_data *ts_data);
 void fts_esdcheck_resume(struct fts_ts_data *ts_data);
+#endif
+
+#ifdef FTS_SET_TOUCH_STATE
+int touch_set_state(int state, int panel_idx);
+int check_touch_state(int *state, int panel_idx);
 #endif
 
 /* Host test */

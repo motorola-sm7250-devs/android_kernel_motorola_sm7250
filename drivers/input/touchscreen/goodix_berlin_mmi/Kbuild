@@ -65,6 +65,21 @@ ifneq ($(filter m y,$(CONFIG_INPUT_TOUCHSCREEN_MMI)),)
     goodix_brl_mmi-objs += goodix_ts_mmi.o
 endif
 
+ifneq ($(filter m y, $(CONFIG_BOARD_USES_DOUBLE_TAP_CTRL)),)
+	EXTRA_CFLAGS += -DCONFIG_BOARD_USES_DOUBLE_TAP_CTRL
+endif
+
+ifneq ($(filter m y,$(CONFIG_INPUT_GOODIX_MMI_ENABLE_PALM)),)
+    EXTRA_CFLAGS += -DGOODIX_PALM_SENSOR_EN
+endif
+
+ifeq ($(TARGET_BUILD_VARIANT), userdebug)
+ifneq ($(filter m y, $(CONFIG_GTP_GHOST_LOG_CAPTURE)),)
+	EXTRA_CFLAGS += -DCONFIG_GTP_GHOST_LOG_CAPTURE
+	goodix_brl_mmi-objs += goodix_ts_log_capture.o
+endif
+endif
+
 ifneq ($(findstring _factory,$(TARGET_PRODUCT)),)
 USE_TARGET_PRODUCT := $(strip $(subst _factory,, $(TARGET_PRODUCT)))
 else
@@ -81,6 +96,22 @@ else ifneq ($(filter li, $(USE_TARGET_PRODUCT)), )
         EXTRA_CFLAGS += -DPRODUCT_LI
 else ifneq ($(filter eqs, $(USE_TARGET_PRODUCT)), )
         EXTRA_CFLAGS += -DPRODUCT_EQS
+else ifneq ($(filter tundra%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_TUNDRA
+else ifneq ($(filter miami%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_MIAMI
+else ifneq ($(filter rtwo%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_RTWO
+else ifneq ($(filter bronco, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_BRONCO
+else ifneq ($(filter felix, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DCONFIG_GTP_DISP_MODE
+else ifneq ($(filter zeekr%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_ZEEKR
+else ifneq ($(filter lynkco%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_LYNKCO
+else ifneq ($(filter bangkk%, $(USE_TARGET_PRODUCT)), )
+        EXTRA_CFLAGS += -DPRODUCT_BANGKK
 endif
 $(warning "william EXTRA_CFLAGS = $(EXTRA_CFLAGS)")
 

@@ -13,6 +13,7 @@
 #include <linux/version.h>
 #include <linux/sizes.h>
 #include <linux/regulator/consumer.h>
+#include <linux/jiffies.h>
 
 #define CWFG_ENABLE_LOG 1 /* CHANGE Customer need to change this for enable/disable log */
 
@@ -76,6 +77,7 @@
 #define CW_VOL_UNIT             1000
 #define CW_CUR_UNIT             1000
 
+#define CW_CUR_ACCURACY		10000
 
 #define CW2217_NOT_ACTIVE          1
 #define CW2217_PROFILE_NOT_READY   2
@@ -137,6 +139,8 @@ struct cw_battery {
 	int  fcc;
 	int  ui_full;
 	int  ntc_exist;
+	int  batt_status;
+	bool present;
 	bool factory_mode;
 	int  sense_r_mohm;
 #if 0
@@ -334,15 +338,57 @@ static int cw_get_voltage(struct cw_battery *cw_bat)
  * enough for the application. The low byte(0x05) provides more accurate fractional part of the SOC and its
  * LSB is (1/256) %.
  */
+ #ifndef MAX_VAL
+   #define  MAX_VAL( x, y ) ( ((x) > (y)) ? (x) : (y) )
+#endif
+
+#ifdef SUPPORT_DYNAMIC_UPDATE_UI_FULL
+#define TIMER_INTERVALS                          1000 * 60    /* unit:ms */
+static bool jiffies_timer_expire(bool clear_flag) {
+	unsigned long cur_jiffies = jiffies;
+	static unsigned long last_jiffies = 0;
+	bool ret = false;
+
+	if (!last_jiffies || clear_flag) {
+		last_jiffies = cur_jiffies;
+		return ret;
+	}
+
+	if (time_after(cur_jiffies, msecs_to_jiffies(TIMER_INTERVALS) + last_jiffies))
+		ret = true;
+	else
+		ret = false;
+
+	if (ret) {
+		cw_printk("expire 60s, curr_jiffies:%dms, last jiffies %d",
+                              jiffies_to_msecs(cur_jiffies), jiffies_to_msecs(last_jiffies));
+		last_jiffies = cur_jiffies;
+
+	}
+	return ret;
+}
+#endif
+
 static int cw_get_capacity(struct cw_battery *cw_bat)
 {
 	int ret;
 	unsigned char reg_val[2] = { 0, 0 };
-	int ui_100 = cw_bat->ui_full;
 	int soc_h;
 	int soc_l;
 	int ui_soc;
 	int remainder;
+	int chr_st_now = 0;// 0 discharge, 1 charging;
+#ifndef SUPPORT_DYNAMIC_UPDATE_UI_FULL
+	int ui_100 = cw_bat->ui_full;
+#else
+	static int ui_full_pre = 0;
+	int ui_full_temp = 0;
+#endif
+
+	if (cw_bat->batt_status == POWER_SUPPLY_STATUS_CHARGING)
+		chr_st_now = 1;
+	else
+		chr_st_now = 0;
 
 	ret = cw_read_word(cw_bat->client, REG_SOC_INT, reg_val);
 	if (ret < 0)
@@ -350,15 +396,59 @@ static int cw_get_capacity(struct cw_battery *cw_bat)
 	soc_h = reg_val[0];
 	soc_l = reg_val[1];
 	cw_bat->raw_soc = soc_h;
+
+#ifndef SUPPORT_DYNAMIC_UPDATE_UI_FULL
 	ui_soc = ((soc_h * 256 + soc_l) * 100)/ (ui_100 * 256);
 	remainder = (((soc_h * 256 + soc_l) * 100 * 100) / (ui_100 * 256)) % 100;
+#else
+	if (ui_full_pre == 0) {
+		ui_full_pre = (soc_h * 256 + soc_l) / 256;
+		if (ui_full_pre < cw_bat->ui_full)
+			ui_full_pre = cw_bat->ui_full;
+		cw_printk("CW2015[%d]: UI_FULL INIT is %d", __LINE__, ui_full_pre);
+	}
+	ui_full_temp = ui_full_pre;
+
+	if (chr_st_now) {
+		if (ui_full_temp > cw_bat->ui_full) {
+			if (jiffies_timer_expire(false)) {
+				ui_full_temp -= 1;
+				cw_printk("CW2015[%d]: UI_FULL-- %d!!!!\n", __LINE__, ui_full_temp);
+			}
+		}
+	}
+
+	if (!chr_st_now) {
+		if ((soc_h * 256 + soc_l) / 256 > ui_full_temp) {
+			cw_printk("CW2015[%d]: update UI_FULL to %d from %d !!!!\n", __LINE__, (soc_h * 256 + soc_l) / 256, ui_full_temp);
+			ui_full_temp = (soc_h * 256 + soc_l) / 256;
+		}
+		jiffies_timer_expire(true);
+	}
+
+	ui_full_pre = ui_full_temp;
+	ui_soc = ((soc_h * 256 + soc_l) * 100)/ (ui_full_pre * 256);
+	remainder = (((soc_h * 256 + soc_l) * 100 * 100) / (ui_full_pre * 256)) % 100;
+#endif
+
 	if (ui_soc >= 100){
 		cw_printk("CW2015[%d]: UI_SOC = %d larger 100!!!!\n", __LINE__, ui_soc);
 		ui_soc = 100;
 	}
+
+	if ((cw_bat->ui_soc == 0) ||
+		(chr_st_now && ui_soc > cw_bat->ui_soc) ||
+		(!chr_st_now && ui_soc < cw_bat->ui_soc)) {
+		cw_bat->ui_soc = ui_soc;
+	}
+
+	if (cw_bat->ui_soc != ui_soc) {
+		cw_printk("CW2015[%d]: not update, cw_bat->ui_soc %d, ui_soc %d, chrg_st_now %d",
+			__LINE__, cw_bat->ui_soc, ui_soc, chr_st_now);
+	}
+
 	cw_bat->ic_soc_h = soc_h;
 	cw_bat->ic_soc_l = soc_l;
-	cw_bat->ui_soc = ui_soc;
 
 	return 0;
 }
@@ -645,6 +735,8 @@ static int cw2217_get_state(struct cw_battery *cw_bat)
 	ret = cw_read(cw_bat->client, REG_MODE_CONFIG, &reg_val);
 	if (ret < 0)
 		return ret;
+
+	cw_printk("REG_MODE_CONFIG 0x%2x = 0x%2x\n", REG_MODE_CONFIG, reg_val);
 	if (reg_val != CONFIG_MODE_ACTIVE)
 		return CW2217_NOT_ACTIVE;
 
@@ -696,9 +788,29 @@ static void cw_bat_work(struct work_struct *work)
 	struct delayed_work *delay_work;
 	struct cw_battery *cw_bat;
 	int ret;
+	int ui_soc;
+	uint32_t elapsed_ms;
+	struct timespec64 now;
+	static struct timespec64 start = {0};
 
 	delay_work = container_of(work, struct delayed_work, work);
 	cw_bat = container_of(delay_work, struct cw_battery, battery_delay_work);
+
+	ktime_get_real_ts64(&now);
+	if (now.tv_sec >= start.tv_sec) {
+		elapsed_ms = (now.tv_sec - start.tv_sec) * 1000;
+		elapsed_ms += (now.tv_nsec - start.tv_nsec) / 1000000;
+	} else {
+		elapsed_ms = 0;
+		start = now;
+	}
+
+	ui_soc = cw_bat->ui_soc;
+	if (elapsed_ms >= queue_delayed_work_time) {
+		ret = cw_update_data(cw_bat);
+		if (ret < 0)
+			printk(KERN_ERR "iic read error when update data");
+	}
 
 	/* get battery power supply */
 	if (!cw_bat->batt_psy) {
@@ -707,15 +819,9 @@ static void cw_bat_work(struct work_struct *work)
 			cw_printk("%s: get batt_psy fail\n", __func__);
 	}
 
-	ret = cw_update_data(cw_bat);
-	if (ret < 0)
-		printk(KERN_ERR "iic read error when update data");
-
-	if (cw_bat->batt_psy) {
+	if (cw_bat->batt_psy && ui_soc != cw_bat->ui_soc) {
 		power_supply_changed(cw_bat->batt_psy);
 	}
-
-	queue_delayed_work(cw_bat->cwfg_workqueue, &cw_bat->battery_delay_work, msecs_to_jiffies(queue_delayed_work_time));
 }
 
 static void cw_hw_init_work(struct work_struct *work)
@@ -725,6 +831,11 @@ static void cw_hw_init_work(struct work_struct *work)
 	int loop = 0;
 
 	cw_bat = container_of(work, struct cw_battery, hw_init_work);
+
+	ret = cw_init_data(cw_bat);
+	if (ret) {
+		printk("%s : cw2217 init data fail!\n", __func__);
+	}
 
 	ret = cw_init(cw_bat);
 	while ((loop++ < CW_RETRY_COUNT) && (ret != 0)) {
@@ -902,6 +1013,30 @@ static int cw_battery_set_property(struct power_supply *psy,
 	return ret;
 }
 
+static void cw_get_batt_status(struct cw_battery *cw_bat)
+{
+	long batt_curr = 0;
+	batt_curr = cw_bat->cw_current * CW_CUR_UNIT * (-1);
+	batt_curr *= cw_bat->ibat_polority;
+
+	if (cw_bat->voltage <= 0 || cw_bat->temp <= CW_BPD_TEMP)
+		cw_bat->present = 0;
+	else
+		cw_bat->present = 1;
+
+	if (!cw_bat->present) {
+		cw_bat->batt_status = POWER_SUPPLY_STATUS_UNKNOWN;
+	} else if (cw_bat->ui_soc == CW_UI_FULL) {
+		cw_bat->batt_status = POWER_SUPPLY_STATUS_FULL;
+	} else if (abs(batt_curr) < CW_CUR_ACCURACY) {
+		cw_bat->batt_status = POWER_SUPPLY_STATUS_NOT_CHARGING;
+	} else if (batt_curr * cw_bat->ibat_polority < 0) {
+		cw_bat->batt_status = POWER_SUPPLY_STATUS_CHARGING;
+	} else {
+		cw_bat->batt_status = POWER_SUPPLY_STATUS_DISCHARGING;
+	}
+}
+
 static unsigned int cw_get_charge_counter(struct cw_battery *cw_bat)
 {
 	int charge_counter;
@@ -927,10 +1062,17 @@ static int cw_battery_get_property(struct power_supply *psy,
 #endif
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_STATUS:
+		cw_get_current(cw_bat);
+		cw_get_batt_status(cw_bat);
+		val->intval = cw_bat->batt_status;
+		break;
 	case POWER_SUPPLY_PROP_CYCLE_COUNT:
+		cw_get_cycle_count(cw_bat);
 		val->intval = cw_bat->cycle;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
+		cw_get_capacity(cw_bat);
 		val->intval = cw_bat->ui_soc;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
@@ -945,6 +1087,11 @@ static int cw_battery_get_property(struct power_supply *psy,
 			val->intval = 1;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		cw_get_voltage(cw_bat);
+		val->intval = cw_bat->voltage * CW_VOL_UNIT;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
+		/* voltage_ocv invalid, use voltage_now instead*/
 		val->intval = cw_bat->voltage * CW_VOL_UNIT;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
@@ -962,9 +1109,11 @@ static int cw_battery_get_property(struct power_supply *psy,
 		val->intval = (cw_bat->fcc_design * cw_bat->soh * 1000)/100;
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
+		cw_get_temp(cw_bat);
 		val->intval = cw_bat->temp;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+		cw_get_soh(cw_bat);
 		val->intval = cw_get_charge_counter(cw_bat);
 		break;
 	default:
@@ -976,11 +1125,13 @@ static int cw_battery_get_property(struct power_supply *psy,
 }
 
 static enum power_supply_property cw_battery_properties[] = {
+	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_OCV,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
