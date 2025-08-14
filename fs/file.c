@@ -729,19 +729,6 @@ static inline struct file *__fget_files_rcu(struct files_struct *files,
 	}
 }
 
-
-static struct file *__fget(unsigned int fd, fmode_t mask, unsigned int refs)
-{
-	struct files_struct *files = current->files;
-	struct file *file;
-
-	rcu_read_lock();
-	file = __fget_files_rcu(files, fd, mask, refs);
-	rcu_read_unlock();
-
-	return file;
-}
-
 struct file *fget_many(unsigned int fd, unsigned int refs)
 {
 	return __fget(fd, FMODE_PATH, refs);

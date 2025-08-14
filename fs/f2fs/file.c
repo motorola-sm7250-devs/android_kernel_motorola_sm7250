@@ -27,6 +27,10 @@
 #include <linux/ufstw.h>
 #endif
 
+#if defined(CONFIG_UFSTW)
+#include <linux/ufstw.h>
+#endif
+
 #include "f2fs.h"
 #include "node.h"
 #include "segment.h"
