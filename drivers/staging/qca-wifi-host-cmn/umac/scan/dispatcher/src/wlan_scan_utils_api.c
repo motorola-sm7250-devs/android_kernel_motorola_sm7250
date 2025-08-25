@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2017-2021 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  * Permission to use, copy, modify, and/or distribute this software for
  * any purpose with or without fee is hereby granted, provided that the
@@ -709,8 +708,7 @@ util_scan_parse_rnr_ie(struct scan_cache_entry *scan_entry,
 	rnr_ie_len = ie->ie_len;
 	data = (uint8_t *)ie + sizeof(struct ie_header);
 
-	while ((data + sizeof(struct neighbor_ap_info_field)) <=
-					((uint8_t *)ie + rnr_ie_len + 2)) {
+	while (data < ((uint8_t *)ie + rnr_ie_len + 2)) {
 		neighbor_ap_info = (struct neighbor_ap_info_field *)data;
 		tbtt_count = neighbor_ap_info->tbtt_header.tbtt_info_count;
 		tbtt_length = neighbor_ap_info->tbtt_header.tbtt_info_length;
@@ -726,8 +724,7 @@ util_scan_parse_rnr_ie(struct scan_cache_entry *scan_entry,
 			break;
 
 		for (i = 0; i < (tbtt_count + 1) &&
-		     (data + tbtt_length) <=
-				((uint8_t *)ie + rnr_ie_len + 2); i++) {
+		     data < ((uint8_t *)ie + rnr_ie_len + 2); i++) {
 			if (i < MAX_RNR_BSS)
 				util_scan_update_rnr(
 					&scan_entry->rnr.bss_info[i],
@@ -756,9 +753,6 @@ util_scan_parse_extn_ie(struct scan_cache_entry *scan_params,
 		scan_params->ie_list.srp   = (uint8_t *)ie;
 		break;
 	case WLAN_EXTN_ELEMID_HECAP:
-		if ((extn_ie->ie_len < WLAN_MIN_HECAP_IE_LEN) ||
-		    (extn_ie->ie_len > WLAN_MAX_HECAP_IE_LEN))
-			return QDF_STATUS_E_INVAL;
 		scan_params->ie_list.hecap = (uint8_t *)ie;
 		break;
 	case WLAN_EXTN_ELEMID_HEOP:
@@ -1018,16 +1012,9 @@ util_scan_populate_bcn_ie_list(struct wlan_objmgr_pdev *pdev,
 				(uint8_t *)&(((struct htcap_ie *)ie)->ie);
 			break;
 		case WLAN_ELEMID_RSN:
-			/*
-			 * For security cert TC, RSNIE length can be 1 but if
-			 * beacon is dropped, old entry will remain in scan
-			 * cache and cause cert TC failure as connection with
-			 * old entry with valid RSN IE will pass.
-			 * So instead of dropping the frame, do not store the
-			 * RSN pointer so that old entry is overwritten.
-			 */
-			if (ie->ie_len >= WLAN_RSN_IE_MIN_LEN)
-				scan_params->ie_list.rsn = (uint8_t *)ie;
+			if (ie->ie_len < WLAN_RSN_IE_MIN_LEN)
+				goto err;
+			scan_params->ie_list.rsn = (uint8_t *)ie;
 			break;
 		case WLAN_ELEMID_XRATES:
 			scan_params->ie_list.xrates = (uint8_t *)ie;
@@ -1116,11 +1103,6 @@ util_scan_populate_bcn_ie_list(struct wlan_objmgr_pdev *pdev,
 				goto err;
 			scan_params->ie_list.fils_indication = (uint8_t *)ie;
 			break;
-		case WLAN_ELEMID_RSNXE:
-			if (!ie->ie_len)
-				goto err;
-			scan_params->ie_list.rsnxe = (uint8_t *)ie;
-			break;
 		case WLAN_ELEMID_EXTN_ELEM:
 			status = util_scan_parse_extn_ie(scan_params, ie);
 			if (QDF_IS_STATUS_ERROR(status))
@@ -1187,8 +1169,7 @@ static void util_scan_update_esp_data(struct wlan_esp_ie *esp_information,
 	esp_ie = (struct wlan_esp_ie *)
 		util_scan_entry_esp_info(scan_entry);
 
-	// Ignore ESP_ID_EXTN element
-	total_elements  = esp_ie->esp_len - 1;
+	total_elements  = esp_ie->esp_len;
 	data = (uint8_t *)esp_ie + 3;
 	do_div(total_elements, ESP_INFORMATION_LIST_LENGTH);
 
@@ -1198,7 +1179,7 @@ static void util_scan_update_esp_data(struct wlan_esp_ie *esp_information,
 	}
 
 	for (i = 0; i < total_elements &&
-	     data < ((uint8_t *)esp_ie + esp_ie->esp_len); i++) {
+	     data < ((uint8_t *)esp_ie + esp_ie->esp_len + 3); i++) {
 		esp_info = (struct wlan_esp_info *)data;
 		if (esp_info->access_category == ESP_AC_BK) {
 			qdf_mem_copy(&esp_information->esp_info_AC_BK,
@@ -1331,7 +1312,7 @@ util_scan_add_hidden_ssid(struct wlan_objmgr_pdev *pdev, qdf_nbuf_t bcnbuf)
 	uint16_t tmplen, ie_length;
 	uint8_t *pbeacon, *tmp;
 	bool     set_ssid_flag = false;
-	struct ie_ssid ssid = {0};
+	struct ie_ssid *ssid;
 	uint8_t pdev_id;
 
 	if (!pdev) {
@@ -1380,15 +1361,8 @@ util_scan_add_hidden_ssid(struct wlan_objmgr_pdev *pdev, qdf_nbuf_t bcnbuf)
 						 sizeof(struct ie_header))) {
 				return QDF_STATUS_E_INVAL;
 			}
-			ssid.ssid_id = ie->ie_id;
-			ssid.ssid_len = ie->ie_len;
-
-			if (ssid.ssid_len)
-				qdf_mem_copy(ssid.ssid,
-					     ie + sizeof(struct ie_header),
-					     ssid.ssid_len);
-
-			if (util_scan_is_hidden_ssid(&ssid)) {
+			ssid = (struct ie_ssid *)ie;
+			if (util_scan_is_hidden_ssid(ssid)) {
 				set_ssid_flag  = true;
 				ssid_ie_start_offset = bcn_ie_offset -
 					sizeof(struct ie_header);
@@ -1415,7 +1389,7 @@ util_scan_add_hidden_ssid(struct wlan_objmgr_pdev *pdev, qdf_nbuf_t bcnbuf)
 
 	if (set_ssid_flag) {
 		/* Hidden SSID if the Length is 0 */
-		if (!ssid.ssid_len) {
+		if (!ssid->ssid_len) {
 			/* increase the taillength by length of ssid */
 			if (qdf_nbuf_put_tail(bcnbuf,
 					      conf_ssid->length) == NULL) {
@@ -1448,7 +1422,7 @@ util_scan_add_hidden_ssid(struct wlan_objmgr_pdev *pdev, qdf_nbuf_t bcnbuf)
 			qdf_mem_free(tmp);
 
 			/* Hidden ssid with all 0's */
-		} else if (ssid.ssid_len == conf_ssid->length) {
+		} else if (ssid->ssid_len == conf_ssid->length) {
 			/* Insert the  SSID string */
 			qdf_mem_copy((pbeacon + ssid_ie_start_offset +
 				      sizeof(struct ie_header)),
@@ -1993,9 +1967,9 @@ util_scan_parse_beacon_frame(struct wlan_objmgr_pdev *pdev,
 {
 	struct wlan_bcn_frame *bcn;
 	struct wlan_frame_hdr *hdr;
-	uint8_t *mbssid_ie = NULL, *extcap_ie;
+	uint8_t *mbssid_ie = NULL;
 	uint32_t ie_len = 0;
-	QDF_STATUS status = QDF_STATUS_E_FAILURE;
+	QDF_STATUS status;
 	struct scan_mbssid_info mbssid_info = { 0 };
 
 	hdr = (struct wlan_frame_hdr *)frame;
@@ -2005,24 +1979,12 @@ util_scan_parse_beacon_frame(struct wlan_objmgr_pdev *pdev,
 		sizeof(struct wlan_frame_hdr) -
 		offsetof(struct wlan_bcn_frame, ie));
 
-	extcap_ie = util_scan_find_ie(WLAN_ELEMID_XCAPS,
+	mbssid_ie = util_scan_find_ie(WLAN_ELEMID_MULTIPLE_BSSID,
 				      (uint8_t *)&bcn->ie, ie_len);
-	/* Process MBSSID when Multiple BSSID (Bit 22) is set in Ext Caps */
-	if (extcap_ie &&
-	    extcap_ie[1] >= 3 && extcap_ie[1] <= WLAN_EXTCAP_IE_MAX_LEN &&
-	    (extcap_ie[4] & 0x40)) {
-		mbssid_ie = util_scan_find_ie(WLAN_ELEMID_MULTIPLE_BSSID,
-					      (uint8_t *)&bcn->ie, ie_len);
-		if (mbssid_ie) {
-			if (mbssid_ie[1] < 4) {
-				scm_debug("MBSSID IE length is wrong %d",
-					  mbssid_ie[1]);
-				return status;
-			}
-			qdf_mem_copy(&mbssid_info.trans_bssid,
-				     hdr->i_addr3, QDF_MAC_ADDR_SIZE);
-			mbssid_info.profile_count = 1 << mbssid_ie[2];
-		}
+	if (mbssid_ie) {
+		qdf_mem_copy(&mbssid_info.trans_bssid,
+			     hdr->i_addr3, QDF_MAC_ADDR_SIZE);
+		mbssid_info.profile_count = 1 << mbssid_ie[2];
 	}
 
 	status = util_scan_gen_scan_entry(pdev, frame, frame_len,
