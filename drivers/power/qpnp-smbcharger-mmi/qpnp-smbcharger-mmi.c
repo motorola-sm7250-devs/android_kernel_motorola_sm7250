@@ -3176,7 +3176,6 @@ static void mmi_heartbeat_work(struct work_struct *work)
 
 	/* Have not been resumed so wait another 100 ms */
 	if (chip->suspended & IS_SUSPENDED) {
-		mmi_err(chip, "HB running before Resume\n");
 		schedule_delayed_work(&chip->heartbeat_work,
 				      msecs_to_jiffies(100));
 		return;
