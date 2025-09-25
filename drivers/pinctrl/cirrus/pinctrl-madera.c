@@ -512,7 +512,7 @@ static void madera_pin_dbg_show_fn(struct madera_pin_private *priv,
 	}
 }
 
-static void madera_pin_dbg_show(struct pinctrl_dev *pctldev,
+static void __maybe_unused madera_pin_dbg_show(struct pinctrl_dev *pctldev,
 				struct seq_file *s,
 				unsigned int pin)
 {
