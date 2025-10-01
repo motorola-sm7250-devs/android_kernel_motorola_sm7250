@@ -101,11 +101,11 @@ static inline void __iomem *gic_dist_base(struct irq_data *d)
 	return NULL;
 }
 
-static void gic_do_wait_for_rwp(void __iomem *base, u32 bit)
+static void gic_do_wait_for_rwp(void __iomem *base)
 {
 	u32 count = 1000000;	/* 1s! */
 
-	while (readl_relaxed_no_log(base + GICD_CTLR) & bit) {
+	while (readl_relaxed_no_log(base + GICD_CTLR) & GICD_CTLR_RWP) {
 		count--;
 		if (!count) {
 			pr_err_ratelimited("RWP timeout, gone fishing\n");
@@ -119,13 +119,13 @@ static void gic_do_wait_for_rwp(void __iomem *base, u32 bit)
 /* Wait for completion of a distributor change */
 static void gic_dist_wait_for_rwp(void)
 {
-	gic_do_wait_for_rwp(gic_data.dist_base, GICD_CTLR_RWP);
+	gic_do_wait_for_rwp(gic_data.dist_base);
 }
 
 /* Wait for completion of a redistributor change */
 static void gic_redist_wait_for_rwp(void)
 {
-	gic_do_wait_for_rwp(gic_data_rdist_rd_base(), GICR_CTLR_RWP);
+	gic_do_wait_for_rwp(gic_data_rdist_rd_base());
 }
 
 #ifdef CONFIG_ARM64
@@ -259,13 +259,6 @@ static int gic_irq_set_irqchip_state(struct irq_data *d,
 	}
 
 	gic_poke_irq(d, reg);
-
-	/*
-	 * Force read-back to guarantee that the active state has taken
-	 * effect, and won't race with a guest-driven deactivation.
-	 */
-	if (reg == GICD_ISACTIVER)
-		gic_peek_irq(d, reg);
 	return 0;
 }
 
@@ -932,7 +925,7 @@ static int gic_cpu_pm_notifier(struct notifier_block *self,
 	if (from_suspend)
 		return NOTIFY_OK;
 
-	if (cmd == CPU_PM_EXIT || cmd == CPU_PM_ENTER_FAILED) {
+	if (cmd == CPU_PM_EXIT) {
 		if (gic_dist_security_disabled())
 			gic_enable_redist(true);
 		gic_cpu_sys_reg_init();
@@ -1310,15 +1303,12 @@ static void __init gic_populate_ppi_partitions(struct device_node *gic_node)
 				continue;
 
 			cpu = of_cpu_node_to_id(cpu_node);
-			if (WARN_ON(cpu < 0)) {
-				of_node_put(cpu_node);
+			if (WARN_ON(cpu < 0))
 				continue;
-			}
 
 			pr_cont("%pOF[%d] ", cpu_node, cpu);
 
 			cpumask_set_cpu(cpu, &part->mask);
-			of_node_put(cpu_node);
 		}
 
 		pr_cont("}\n");

@@ -267,7 +267,7 @@ static const struct file_operations pm_qos_debug_fops = {
 };
 
 static inline int pm_qos_set_value_for_cpus(struct pm_qos_constraints *c,
-					     bool dev_req, struct cpumask *cpus)
+		bool dev_req, struct cpumask *cpus)
 {
 	struct pm_qos_request *req = NULL;
 	int cpu;

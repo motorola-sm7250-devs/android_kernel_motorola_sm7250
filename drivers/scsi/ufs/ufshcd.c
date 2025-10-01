@@ -664,11 +664,14 @@ static void ufshcd_add_query_upiu_trace(struct ufs_hba *hba, unsigned int tag,
 static void ufshcd_add_tm_upiu_trace(struct ufs_hba *hba, unsigned int tag,
 		const char *str)
 {
+	struct utp_task_req_desc *descp;
+	struct utp_upiu_task_req *task_req;
 	int off = (int)tag - hba->nutrs;
-	struct utp_task_req_desc *descp = &hba->utmrdl_base_addr[off];
 
-	trace_ufshcd_upiu(dev_name(hba->dev), str, &descp->req_header,
-			&descp->input_param1);
+	descp = &hba->utmrdl_base_addr[off];
+	task_req = (struct utp_upiu_task_req *)descp->task_req_upiu;
+	trace_ufshcd_upiu(dev_name(hba->dev), str, &task_req->header,
+			&task_req->input_param1);
 }
 
 #define UFSHCD_MAX_CMD_LOGGING	200
@@ -985,16 +988,25 @@ void ufshcd_print_trs(struct ufs_hba *hba, unsigned long bitmap, bool pr_prdt)
 
 static void ufshcd_print_tmrs(struct ufs_hba *hba, unsigned long bitmap)
 {
+	struct utp_task_req_desc *tmrdp;
 	int tag;
 
 	if (!(hba->ufshcd_dbg_print & UFSHCD_DBG_PRINT_TMRS_EN))
 		return;
 
 	for_each_set_bit(tag, &bitmap, hba->nutmrs) {
-		struct utp_task_req_desc *tmrdp = &hba->utmrdl_base_addr[tag];
-
+		tmrdp = &hba->utmrdl_base_addr[tag];
 		dev_err(hba->dev, "TM[%d] - Task Management Header\n", tag);
-		ufshcd_hex_dump(hba, "", tmrdp, sizeof(*tmrdp));
+		ufshcd_hex_dump(hba, "TM TRD", &tmrdp->header,
+				sizeof(struct request_desc_header));
+		dev_err(hba->dev, "TM[%d] - Task Management Request UPIU\n",
+				tag);
+		ufshcd_hex_dump(hba, "TM REQ", tmrdp->task_req_upiu,
+				sizeof(struct utp_upiu_req));
+		dev_err(hba->dev, "TM[%d] - Task Management Response UPIU\n",
+				tag);
+		ufshcd_hex_dump(hba, "TM RSP", tmrdp->task_rsp_upiu,
+				sizeof(struct utp_task_req_desc));
 	}
 }
 
@@ -2523,19 +2535,19 @@ static ssize_t ufshcd_clkgate_enable_store(struct device *dev,
 		return -EINVAL;
 
 	value = !!value;
-
-	spin_lock_irqsave(hba->host->host_lock, flags);
 	if (value == hba->clk_gating.is_enabled)
 		goto out;
 
-	if (value)
-		hba->clk_gating.active_reqs--;
-	else
+	if (value) {
+		ufshcd_release(hba, false);
+	} else {
+		spin_lock_irqsave(hba->host->host_lock, flags);
 		hba->clk_gating.active_reqs++;
+		spin_unlock_irqrestore(hba->host->host_lock, flags);
+	}
 
 	hba->clk_gating.is_enabled = value;
 out:
-	spin_unlock_irqrestore(hba->host->host_lock, flags);
 	return count;
 }
 
@@ -2607,7 +2619,7 @@ static void ufshcd_init_clk_gating(struct ufs_hba *hba)
 	snprintf(wq_name, ARRAY_SIZE(wq_name), "ufs_clk_gating_%d",
 		 hba->host->host_no);
 	hba->clk_gating.clk_gating_workq = alloc_ordered_workqueue(wq_name,
-					WQ_MEM_RECLAIM | WQ_HIGHPRI);
+							   WQ_MEM_RECLAIM);
 
 	gating->is_enabled = true;
 
@@ -5123,16 +5135,11 @@ static inline void ufshcd_add_delay_before_dme_cmd(struct ufs_hba *hba)
 			min_sleep_time_us =
 				MIN_DELAY_BEFORE_DME_CMDS_US - delta;
 		else
-			min_sleep_time_us = 0; /* no more delay required */
+			return; /* no more delay required */
 	}
 
-	if (min_sleep_time_us > 0) {
-		/* allow sleep for extra 50us if needed */
-		usleep_range(min_sleep_time_us, min_sleep_time_us + 50);
-	}
-
-	/* update the last_dme_cmd_tstamp */
-	hba->last_dme_cmd_tstamp = ktime_get();
+	/* allow sleep for extra 50us if needed */
+	usleep_range(min_sleep_time_us, min_sleep_time_us + 50);
 }
 
 static inline void ufshcd_save_tstamp_of_last_dme_cmd(
@@ -5306,7 +5313,7 @@ static int ufshcd_uic_pwr_ctrl(struct ufs_hba *hba, struct uic_command *cmd)
 		 * Make sure UIC command completion interrupt is disabled before
 		 * issuing UIC command.
 		 */
-		ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+		wmb();
 		reenable_intr = true;
 	}
 	ret = __ufshcd_send_uic_cmd(hba, cmd, false);
@@ -6412,22 +6419,31 @@ static void ufshcd_slave_destroy(struct scsi_device *sdev)
  */
 static int ufshcd_task_req_compl(struct ufs_hba *hba, u32 index, u8 *resp)
 {
-	struct utp_task_req_desc *treq = hba->utmrdl_base_addr + index;
+	struct utp_task_req_desc *task_req_descp;
+	struct utp_upiu_task_rsp *task_rsp_upiup;
 	unsigned long flags;
 	int ocs_value;
+	int task_result;
 
 	spin_lock_irqsave(hba->host->host_lock, flags);
 
 	/* Clear completed tasks from outstanding_tasks */
 	__clear_bit(index, &hba->outstanding_tasks);
 
-	ocs_value = ufshcd_get_tmr_ocs(treq);
+	task_req_descp = hba->utmrdl_base_addr;
+	ocs_value = ufshcd_get_tmr_ocs(&task_req_descp[index]);
 
-	if (ocs_value != OCS_SUCCESS)
+	if (ocs_value == OCS_SUCCESS) {
+		task_rsp_upiup = (struct utp_upiu_task_rsp *)
+				task_req_descp[index].task_rsp_upiu;
+		task_result = be32_to_cpu(task_rsp_upiup->output_param1);
+		task_result = task_result & MASK_TM_SERVICE_RESP;
+		if (resp)
+			*resp = (u8)task_result;
+	} else {
 		dev_err(hba->dev, "%s: failed, ocs = 0x%x\n",
 				__func__, ocs_value);
-	else if (resp)
-		*resp = be32_to_cpu(treq->output_param1) & MASK_TM_SERVICE_RESP;
+	}
 	spin_unlock_irqrestore(hba->host->host_lock, flags);
 
 	return ocs_value;
@@ -7983,7 +7999,8 @@ static int ufshcd_issue_tm_cmd(struct ufs_hba *hba, int lun_id, int task_id,
 		u8 tm_function, u8 *tm_response)
 #endif
 {
-	struct utp_task_req_desc *treq;
+	struct utp_task_req_desc *task_req_descp;
+	struct utp_upiu_task_req *task_req_upiup;
 	struct Scsi_Host *host;
 	unsigned long flags;
 	int free_slot;
@@ -8002,23 +8019,29 @@ static int ufshcd_issue_tm_cmd(struct ufs_hba *hba, int lun_id, int task_id,
 	ufshcd_hold_all(hba);
 
 	spin_lock_irqsave(host->host_lock, flags);
-	treq = hba->utmrdl_base_addr + free_slot;
+	task_req_descp = hba->utmrdl_base_addr;
+	task_req_descp += free_slot;
 
 	/* Configure task request descriptor */
-	treq->header.dword_0 = cpu_to_le32(UTP_REQ_DESC_INT_CMD);
-	treq->header.dword_2 = cpu_to_le32(OCS_INVALID_COMMAND_STATUS);
+	task_req_descp->header.dword_0 = cpu_to_le32(UTP_REQ_DESC_INT_CMD);
+	task_req_descp->header.dword_2 =
+			cpu_to_le32(OCS_INVALID_COMMAND_STATUS);
 
 	/* Configure task request UPIU */
+	task_req_upiup =
+		(struct utp_upiu_task_req *) task_req_descp->task_req_upiu;
 	task_tag = hba->nutrs + free_slot;
-	treq->req_header.dword_0 = UPIU_HEADER_DWORD(UPIU_TRANSACTION_TASK_REQ,
-			0, lun_id, task_tag);
-	treq->req_header.dword_1 = UPIU_HEADER_DWORD(0, tm_function, 0, 0);
+	task_req_upiup->header.dword_0 =
+		UPIU_HEADER_DWORD(UPIU_TRANSACTION_TASK_REQ, 0,
+					      lun_id, task_tag);
+	task_req_upiup->header.dword_1 =
+		UPIU_HEADER_DWORD(0, tm_function, 0, 0);
 	/*
 	 * The host shall provide the same value for LUN field in the basic
 	 * header and for Input Parameter.
 	 */
-	treq->input_param1 = cpu_to_be32(lun_id);
-	treq->input_param2 = cpu_to_be32(task_id);
+	task_req_upiup->input_param1 = cpu_to_be32(lun_id);
+	task_req_upiup->input_param2 = cpu_to_be32(task_id);
 
 	ufshcd_vops_setup_task_mgmt(hba, free_slot, tm_function);
 
@@ -11247,7 +11270,6 @@ int ufshcd_shutdown(struct ufs_hba *hba)
 	/* reqs issued from contexts other than shutdown will fail from now */
 	ufshcd_scsi_unblock_requests(hba);
 	ufshcd_release_all(hba);
-
 	ret = ufshcd_suspend(hba, UFS_SHUTDOWN_PM);
 out:
 	if (ret)
@@ -11401,13 +11423,6 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	struct device *dev = hba->dev;
 	char recovery_wq_name[sizeof("ufs_recovery_00")];
 
-	/*
-	 * dev_set_drvdata() must be called before any callbacks are registered
-	 * that use dev_get_drvdata() (frequency scaling, clock scaling, hwmon,
-	 * sysfs).
-	 */
-	dev_set_drvdata(dev, hba);
-
 	if (!mmio_base) {
 		dev_err(hba->dev,
 		"Invalid memory reference for mmio_base is NULL\n");
@@ -11522,7 +11537,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	 * Make sure that UFS interrupts are disabled and any pending interrupt
 	 * status is cleared before registering UFS interrupt handler.
 	 */
-	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+	mb();
 
 	/* IRQ registration */
 	err = devm_request_irq(dev, irq, ufshcd_intr, IRQF_SHARED,
@@ -11635,6 +11650,5 @@ __setup("storage_mfrid=",storage_mfrid_setup);
 MODULE_AUTHOR("Santosh Yaragnavi <santosh.sy@samsung.com>");
 MODULE_AUTHOR("Vinayak Holikatti <h.vinayak@samsung.com>");
 MODULE_DESCRIPTION("Generic UFS host controller driver Core");
-MODULE_SOFTDEP("pre: governor_simpleondemand");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(UFSHCD_DRIVER_VERSION);
