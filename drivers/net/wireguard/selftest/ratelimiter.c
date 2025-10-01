@@ -176,6 +176,7 @@ bool __init wg_ratelimiter_selftest(void)
 				test += test_count;
 				goto err;
 			}
+			msleep(500);
 			continue;
 		} else if (ret < 0) {
 			test += test_count;
@@ -194,6 +195,7 @@ bool __init wg_ratelimiter_selftest(void)
 				test += test_count;
 				goto err;
 			}
+			msleep(50);
 			continue;
 		}
 		test += test_count;
