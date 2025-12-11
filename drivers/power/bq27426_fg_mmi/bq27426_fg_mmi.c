@@ -49,11 +49,6 @@
 #include <linux/of_gpio.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
-#include <linux/version.h>
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)
-#define ENABLE_EXTENDED_BATT_PROPS
-#endif
 
 #ifdef ATL_4000MAH_8A_BATTERY_PROFILE
 #include "battery_profile/imported/lenovo_atl_df1_gmfs.h"
@@ -69,10 +64,6 @@
 
 #ifdef ATL_LS40_1545MAH_BATTERY_PROFILE
 #include "battery_profile/imported/smith_battery_flip_LS40_0826-bq27426G1-2766.gm.fs.h"
-#endif
-
-#ifdef ATL_NM40_712MAH_BATTERY_PROFILE
-#include "battery_profile/imported/alt_nm40_712mah_bq27426g1.gm.fs.h"
 #endif
 
 #undef pr_debug
@@ -107,12 +98,11 @@ enum print_reason {
 	PR_MOTO         = BIT(7),
 };
 
-static int __debug_mask = 0;
+static int __debug_mask = 0xFF;
 module_param_named(
 	debug_mask, __debug_mask, int, S_IRUSR | S_IWUSR
 );
 
-#define FG_HEARTBEAT_RATE 60000
 #define	MONITOR_ALARM_CHECK_NS	5000000000
 #define	INVALID_REG_ADDR	0xFF
 #define BQFS_UPDATE_KEY		0x8F91
@@ -202,12 +192,6 @@ static struct batt_chem_id batt_chem_id_arr[] = {
 	{3142, FG_SUBCMD_CHEM_C},
 };
 
-enum temp_source {
-	TEMP_SOURCE_INTERNAL = 0,
-	TEMP_SOURCE_EXTERNAL,
-	TEMP_SOURCE_HOST,
-};
-
 static const struct fg_batt_profile bqfs_image[] = {
 
 #ifdef ATL_4000MAH_8A_BATTERY_PROFILE
@@ -224,10 +208,6 @@ static const struct fg_batt_profile bqfs_image[] = {
 
 #ifdef ATL_LS40_1545MAH_BATTERY_PROFILE
 	{.batt_type_str = "LS40_ATL_1545MAH", .bqfs_image = smith_flip_bqfs_image, .array_size = ARRAY_SIZE(smith_flip_bqfs_image), .chem_id = 0x2766, .dm_ver = 5},
-#endif
-
-#ifdef ATL_NM40_712MAH_BATTERY_PROFILE
-	{.batt_type_str = "NM40_ATL_712MAH", .bqfs_image = li_alt_flip_bqfs_image, .array_size = ARRAY_SIZE(li_alt_flip_bqfs_image), .chem_id = 0x5725, .dm_ver = 0},
 #endif
 
 };
@@ -323,8 +303,6 @@ struct bq_fg_chip {
 	unsigned long last_update;
 	const char *batt_profile_name;
 	const char *batt_name;
-	u32 temp_source;
-	int ibat_polority;
 
 	/* debug */
 	int	skip_reads;
@@ -688,7 +666,7 @@ static int fg_unseal(struct bq_fg_chip *bq, u32 key)
 }
 
 
-int fg_unseal_fa(struct bq_fg_chip *bq, u32 key)
+static int fg_unseal_fa(struct bq_fg_chip *bq, u32 key)
 {
 	int ret;
 	int retry = 0;
@@ -807,7 +785,7 @@ static int fg_read_dm_version(struct bq_fg_chip* bq, u8 *ver)
 }
 
 #define	CFG_UPDATE_POLLING_RETRY_LIMIT	50
-int fg_dm_pre_access(struct bq_fg_chip *bq)
+static int fg_dm_pre_access(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -839,7 +817,7 @@ int fg_dm_pre_access(struct bq_fg_chip *bq)
 }
 EXPORT_SYMBOL_GPL(fg_dm_pre_access);
 
-int fg_dm_post_access(struct bq_fg_chip *bq)
+static int fg_dm_post_access(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -873,7 +851,7 @@ static int fg_dm_enter_cfg_mode(struct bq_fg_chip *bq)
 		return fg_dm_pre_access(bq);
 }
 
-int fg_dm_exit_cfg_mode(struct bq_fg_chip *bq)
+static int fg_dm_exit_cfg_mode(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -911,7 +889,7 @@ EXPORT_SYMBOL_GPL(fg_dm_exit_cfg_mode);
 #define	DM_ACCESS_BLOCK_DATA		0x40
 
 
-int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
+static int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
 							u8 offset, u8 *buf)
 {
 	int ret;
@@ -948,7 +926,7 @@ int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
 }
 EXPORT_SYMBOL_GPL(fg_dm_read_block);
 
-int fg_dm_write_block(struct bq_fg_chip *bq, u8 classid,
+static int fg_dm_write_block(struct bq_fg_chip *bq, u8 classid,
 							u8 offset, u8 *data)
 {
 	int ret;
@@ -1026,25 +1004,19 @@ static int fg_read_fw_version(struct bq_fg_chip *bq)
 	return version;
 }
 
-#define BPD_TEMP_THRE (-300)
-static int fg_read_temperature(struct bq_fg_chip *bq);
+
 static int fg_read_status(struct bq_fg_chip *bq)
 {
 	int ret;
 	u16 flags;
-	int batt_temp;
 
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_FLAGS], &flags);
 	if (ret < 0) {
 		return ret;
 	}
 
-	batt_temp = fg_read_temperature(bq) - 2730;
 	mutex_lock(&bq->data_lock);
-	if (batt_temp > BPD_TEMP_THRE)
-		bq->batt_present	= !!(flags & FG_FLAGS_BAT_DET);
-	else
-		bq->batt_present	= false;
+	bq->batt_present	= !!(flags & FG_FLAGS_BAT_DET);
 	bq->batt_ot			= !!(flags & FG_FLAGS_OT);
 	bq->batt_ut			= !!(flags & FG_FLAGS_UT);
 	bq->batt_fc			= !!(flags & FG_FLAGS_FC);
@@ -1292,7 +1264,6 @@ static int fg_get_batt_health(struct bq_fg_chip *bq)
 
 }
 
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 static int fg_read_soh(struct bq_fg_chip *bq)
 {
 	int ret;
@@ -1306,7 +1277,6 @@ static int fg_read_soh(struct bq_fg_chip *bq)
 
 	return soh;
 }
-#endif
 
 static enum power_supply_property fg_props[] = {
 	POWER_SUPPLY_PROP_STATUS,
@@ -1320,14 +1290,11 @@ static enum power_supply_property fg_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
-	POWER_SUPPLY_PROP_VOLTAGE_OCV,
-	POWER_SUPPLY_PROP_CHARGE_COUNTER,
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 	POWER_SUPPLY_PROP_RESISTANCE_ID,
 	POWER_SUPPLY_PROP_UPDATE_NOW,
 	POWER_SUPPLY_PROP_BATTERY_TYPE,
+	POWER_SUPPLY_PROP_VOLTAGE_OCV,
 	POWER_SUPPLY_PROP_SOH,
-#endif
 };
 
 static int fg_get_property(struct power_supply *psy,
@@ -1357,7 +1324,7 @@ static int fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		mutex_lock(&bq->data_lock);
 		fg_read_current(bq, &bq->batt_curr);
-		val->intval = -bq->batt_curr * 1000 * bq->ibat_polority;
+		val->intval = -bq->batt_curr * 1000;
 		mutex_unlock(&bq->data_lock);
 		break;
 
@@ -1438,25 +1405,7 @@ static int fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LIPO;
 		break;
-	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
-		ret = fg_read_ocv_voltage(bq);
-		mutex_lock(&bq->data_lock);
-		if (ret >= 0)
-			bq->batt_vocv= ret;
-		val->intval = bq->batt_vocv * 1000;
-		mutex_unlock(&bq->data_lock);
-		break;
 
-	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
-		ret = fg_read_rm(bq);
-		mutex_lock(&bq->data_lock);
-		if (ret >= 0)
-			bq->batt_rm = ret;
-		val->intval = bq->batt_rm * 1000;
-		mutex_unlock(&bq->data_lock);
-		break;
-
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 	case POWER_SUPPLY_PROP_RESISTANCE_ID:
 		val->intval = bq->connected_rid ;
 		break;
@@ -1468,10 +1417,17 @@ static int fg_get_property(struct power_supply *psy,
 			val->strval = bqfs_image[bq->batt_id].batt_type_str;
 		else val->strval = "No battery type";
 		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
+		ret = fg_read_ocv_voltage(bq);
+		mutex_lock(&bq->data_lock);
+		if (ret >= 0)
+			bq->batt_vocv= ret;
+		val->intval = bq->batt_vocv * 1000;
+		mutex_unlock(&bq->data_lock);
+		break;
 	case POWER_SUPPLY_PROP_SOH:
 		val->intval = fg_read_soh(bq);
 		break;
-#endif
 	default:
 		mutex_unlock(&bq->update_lock);
 		return -EINVAL;
@@ -1495,11 +1451,9 @@ static int fg_set_property(struct power_supply *psy,
 		bq->fake_soc = val->intval;
 		power_supply_changed(bq->fg_psy);
 		break;
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 	case POWER_SUPPLY_PROP_UPDATE_NOW:
 		fg_dump_registers(bq);
 		break;
-#endif
 	default:
 		return -EINVAL;
 	}
@@ -1516,9 +1470,7 @@ static int fg_prop_is_writeable(struct power_supply *psy,
 	switch (prop) {
 	case POWER_SUPPLY_PROP_TEMP:
 	case POWER_SUPPLY_PROP_CAPACITY:
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 	case POWER_SUPPLY_PROP_UPDATE_NOW:
-#endif
 	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
 		ret = 1;
 		break;
@@ -1545,11 +1497,7 @@ static int fg_psy_register(struct bq_fg_chip *bq)
 	struct power_supply_config fg_cfg = {};
 
 	bq->fg_psy_desc.name = bq->batt_name;
-#ifdef ENABLE_EXTENDED_BATT_PROPS
 	bq->fg_psy_desc.type = POWER_SUPPLY_TYPE_BMS;
-#else
-	bq->fg_psy_desc.type = POWER_SUPPLY_TYPE_UNKNOWN;
-#endif
 	bq->fg_psy_desc.properties = fg_props;
 	bq->fg_psy_desc.num_properties = ARRAY_SIZE(fg_props);
 	bq->fg_psy_desc.get_property = fg_get_property;
@@ -1597,7 +1545,7 @@ static int fg_read_chem_id(struct bq_fg_chip *bq, u16 *chem_id)
 	return ret;
 }
 
-int fg_change_chem_id(struct bq_fg_chip *bq, u16 new_id)
+static int fg_change_chem_id(struct bq_fg_chip *bq, u16 new_id)
 {
 	int ret;
 	u16 old_id;
@@ -1696,7 +1644,7 @@ static int fg_check_update_necessary(struct bq_fg_chip *bq)
 	return 0;
 }
 
-bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
+static bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
 										const bqfs_cmd_t *cmd)
 {
 	int ret;
@@ -1744,7 +1692,7 @@ bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
 }
 EXPORT_SYMBOL_GPL(fg_update_bqfs_execute_cmd);
 
-void fg_update_bqfs(struct bq_fg_chip *bq)
+static void fg_update_bqfs(struct bq_fg_chip *bq)
 {
 	int i;
 	const bqfs_cmd_t *image;
@@ -2018,7 +1966,7 @@ static const struct attribute_group fg_attr_group = {
 	.attrs = fg_attributes,
 };
 
-int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
+static int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
 {
 
 	int ret;
@@ -2055,7 +2003,7 @@ int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
 }
 EXPORT_SYMBOL_GPL(fg_enable_sleep);
 
-int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
+static int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2088,7 +2036,7 @@ int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
 }
 EXPORT_SYMBOL_GPL(fg_set_term_voltage);
 
-int fg_set_term_curr(struct bq_fg_chip *bq, int val)
+static int fg_set_term_curr(struct bq_fg_chip *bq, int val)
 {
 	int ret = -1, curr = 0;
 	u8 rd_buf[64];
@@ -2139,8 +2087,7 @@ int fg_set_term_curr(struct bq_fg_chip *bq, int val)
 }
 EXPORT_SYMBOL_GPL(fg_set_term_curr);
 
-#define TEMP_SOURCE_MASK 0x03
-int fg_select_external_temp(struct bq_fg_chip *bq)
+static int fg_select_external_temp(struct bq_fg_chip *bq)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2160,8 +2107,7 @@ int fg_select_external_temp(struct bq_fg_chip *bq)
 		return ret;
 	}
 
-	rd_buf[1] &= ~TEMP_SOURCE_MASK;
-	rd_buf[1] |= (bq->temp_source & TEMP_SOURCE_MASK);
+	rd_buf[1] |=0x01;	// set external temp source
 
 	ret = fg_dm_write_block(bq, 64, 0, rd_buf);
 
@@ -2172,7 +2118,7 @@ int fg_select_external_temp(struct bq_fg_chip *bq)
 }
 EXPORT_SYMBOL_GPL(fg_select_external_temp);
 
-int fg_dodateoc_delta_t(struct bq_fg_chip *bq)
+static int fg_dodateoc_delta_t(struct bq_fg_chip *bq)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2242,10 +2188,9 @@ static void debug_fg_dump_registers(struct bq_fg_chip *bq)
 			sprintf(buf + desc, "Reg[%02X] = %d, ", debug_fg_dump_regs[i], val);
 		}
 	}
-	mmi_fg_dbg(bq, PR_DEBUG, "%s\n", buf);
 }
 
-#define ITERM 200
+#define ITERM 80
 static void fg_check_soc(struct bq_fg_chip *bq)
 {
 	int batt_status = 0;
@@ -2267,7 +2212,7 @@ static void fg_check_soc(struct bq_fg_chip *bq)
 		&& bq->batt_curr < ITERM
 		&& (batt_status == POWER_SUPPLY_STATUS_NOT_CHARGING
 			|| batt_status == POWER_SUPPLY_STATUS_CHARGING)) {
-		pr_err("Force report soc 100, batt curr %d, batt status %d\n",
+		mmi_fg_err(bq, "Force report soc 100, batt curr %d, batt status %d\n",
 				bq->batt_curr, batt_status);
 		bq->batt_soc = 100;
 	}
@@ -2373,28 +2318,12 @@ static int bq_parse_dt(struct bq_fg_chip *bq)
 	bq->name = bq->batt_name;
 
 	rc = of_property_read_string(node, "mmi,batt-profile-name", &bq->batt_profile_name);
-	if (rc) {
-		mmi_fg_err(bq, "battery profile name is not specified in dts\n");
+	if (rc)
 		bq->batt_profile_name = NULL;
-		return rc;
-	}
 
 	rc = of_property_read_u32(node,	"design-capacity", &bq->batt_dc_conf);
-	if (rc < 0) {
-		bq->batt_dc_conf = 0;
-		rc = 0;
-	}
-
-	rc = of_property_read_u32(node,	"mmi,temp-source", &bq->temp_source);
-	if (rc < 0) {
-		bq->temp_source = TEMP_SOURCE_EXTERNAL;
-		rc = 0;
-	}
-
-	if (of_property_read_bool(node, "mmi,ibat-invert-polority"))
-		bq->ibat_polority = -1;
-	else
-		bq->ibat_polority = 1;
+	if (rc < 0)
+		bq->batt_dc_conf = 0;;
 
 	return rc;
 }
@@ -2436,7 +2365,7 @@ static void bq_heartbeat_work(struct work_struct *work)
 	debug_fg_dump_registers(chip);
 	queue_delayed_work(chip->heartbeat_wq,
 			&chip->heartbeat_work,
-			msecs_to_jiffies(FG_HEARTBEAT_RATE));
+			msecs_to_jiffies(1000));
 }
 
 static int bq_fg_probe(struct i2c_client *client,
@@ -2491,7 +2420,7 @@ static int bq_fg_probe(struct i2c_client *client,
 	bq->resume_completed = true;
 	bq->irq_waiting = false;
 
-	bq->regmap = devm_regmap_init_i2c(client, &bq27426_regmap_config);
+	bq->regmap = regmap_init_i2c(client, &bq27426_regmap_config);
 	if (IS_ERR(bq->regmap)) {
 		pr_err("Couldn't initialize register regmap rc = %ld\n",
 				PTR_ERR(bq->regmap));
@@ -2503,15 +2432,6 @@ static int bq_fg_probe(struct i2c_client *client,
 	if (ret < 0) {
 		dev_err(&client->dev, "Unable to parse DT nodes\n");
 		goto free_mem;
-	}
-
-	bq->vdd_i2c_vreg = devm_regulator_get_optional(&client->dev, "vdd-i2c");
-	if (IS_ERR_OR_NULL(bq->vdd_i2c_vreg)) {
-		dev_err(&client->dev, "Could not get vdd-i2c power regulator\n");
-	} else {
-		ret = regulator_enable(bq->vdd_i2c_vreg);
-		if (ret)
-			dev_err(&client->dev, "Could not enable vdd-i2c power regulator\n");
 	}
 
 	ret = fg_read_fw_version(bq);
@@ -2636,12 +2556,6 @@ static int bq_fg_remove(struct i2c_client *client)
 
 	debugfs_remove_recursive(bq->debug_root);
 	sysfs_remove_group(&bq->dev->kobj, &fg_attr_group);
-
-	if (!IS_ERR_OR_NULL(bq->vdd_i2c_vreg)) {
-		if (regulator_is_enabled(bq->vdd_i2c_vreg))
-			regulator_disable(bq->vdd_i2c_vreg);
-		devm_regulator_put(bq->vdd_i2c_vreg);
-	}
 
 	return 0;
 }

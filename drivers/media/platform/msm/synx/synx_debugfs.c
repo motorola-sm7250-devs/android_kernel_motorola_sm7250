@@ -67,11 +67,12 @@ static ssize_t synx_table_read(struct file *file,
 		row = &dev->synx_table[i];
 
 		index = row->index;
-		if (!index) {
+		mutex_lock(&dev->row_locks[index]);
+		if (!row->index) {
+			mutex_unlock(&dev->row_locks[index]);
 			pr_debug("synx obj at %d invalid\n", index);
 			continue;
 		}
-		mutex_lock(&dev->row_locks[index]);
 
 		if (columns & NAME_COLUMN)
 			cur += scnprintf(cur, end - cur,

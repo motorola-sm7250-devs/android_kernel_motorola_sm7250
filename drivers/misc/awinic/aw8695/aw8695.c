@@ -30,7 +30,6 @@
 #include <linux/pm_qos.h>
 #include <linux/syscalls.h>
 #include <linux/power_supply.h>
-#include <linux/mmi_kernel_common.h>
 #include "aw8695.h"
 #include "aw8695_reg.h"
 #include "aw8695_config.h"
@@ -67,9 +66,6 @@
 #define PM_QOS_VALUE_VB 400
 struct pm_qos_request pm_qos_req_vb;
 
-#ifdef CONFIG_AF_NOISE_ELIMINATION
-static bool is_af_enabled = false;
-#endif
 /******************************************************
  *
  * variable
@@ -129,8 +125,6 @@ static char aw8695_rtp_name[][AW8695_RTP_NAME_MAX] = {
 	{"aw8695_rtp_City_Lights.bin"},
 	{"aw8695_rtp_Firefly.bin"},
 	{"aw8695_rtp_Now_or_Never.bin"},
-	{"aw8695_rtp_Moto_Retro.bin"},
-	{"aw8695_rtp_Moto_Original.bin"},
 };
 
 struct aw8695_container *aw8695_rtp;
@@ -590,14 +584,9 @@ static int aw8695_haptic_play_go(struct aw8695 *aw8695, bool flag)
 	pr_debug("%s enter\n", __func__);
 
 	if (!flag) {
-		GET_TIME_OF_DAY(&aw8695->current_time);
+		do_gettimeofday(&aw8695->current_time);
 		aw8695->interval_us = (aw8695->current_time.tv_sec - aw8695->pre_enter_time.tv_sec) * 1000000
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
-			+ (aw8695->current_time.tv_nsec - aw8695->pre_enter_time.tv_nsec) / 1000;
-#else
 			+ (aw8695->current_time.tv_usec - aw8695->pre_enter_time.tv_usec);
-#endif
-
 		if (aw8695->interval_us < 2000) {
 			pr_info("aw8695->interval_us t=%u\n", aw8695->interval_us);
 			mdelay(2);
@@ -606,7 +595,7 @@ static int aw8695_haptic_play_go(struct aw8695 *aw8695, bool flag)
 	if(flag == true) {
 		aw8695_i2c_write_bits(aw8695, AW8695_REG_GO,
 			AW8695_BIT_GO_MASK, AW8695_BIT_GO_ENABLE);
-		GET_TIME_OF_DAY(&aw8695->pre_enter_time);
+		do_gettimeofday(&aw8695->pre_enter_time);
 	} else {
 		aw8695_i2c_write_bits(aw8695, AW8695_REG_GO,
 			AW8695_BIT_GO_MASK, AW8695_BIT_GO_DISABLE);
@@ -642,11 +631,8 @@ static int aw8695_haptic_stop(struct aw8695 *aw8695)
 	aw8695_haptic_play_mode(aw8695, AW8695_HAPTIC_STANDBY_MODE);
 
 #ifdef CONFIG_AF_NOISE_ELIMINATION
-	if ((aw8695->haptic_mode == HAPTIC_LONG) || (is_af_enabled == true)) {
-		pr_info("%s: %d: mot_actuator_on_vibrate_stop, duration=%d, haptic_mode=%d, play_mode=%hhu \n", __func__,__LINE__
-			,aw8695->duration,aw8695->haptic_mode,aw8695->play_mode);
+	if (aw8695->duration > 80)	{
 		mot_actuator_on_vibrate_stop();
-		is_af_enabled = false;
 	}
 #endif
 
@@ -656,6 +642,12 @@ static int aw8695_haptic_stop(struct aw8695 *aw8695)
 static int aw8695_haptic_start(struct aw8695 *aw8695)
 {
 	pr_debug("%s enter\n", __func__);
+
+#ifdef CONFIG_AF_NOISE_ELIMINATION
+	if (aw8695->duration > 80) {
+		mot_actuator_on_vibrate_start();
+	}
+#endif
 
 	aw8695_haptic_play_go(aw8695, true);
 
@@ -1489,12 +1481,6 @@ static int aw8695_haptic_get_f0(struct aw8695 *aw8695)
 	/* clear aw8695 interrupt */
 	ret = aw8695_i2c_read(aw8695, AW8695_REG_SYSINT, &reg_val);
 
-#ifdef CONFIG_AF_NOISE_ELIMINATION
-	pr_info("%s: %d: mot_actuator_on_vibrate_start, duration=%d, haptic_mode=%d, play_mode=%hhu \n", __func__,__LINE__
-		,aw8695->duration,aw8695->haptic_mode,aw8695->play_mode);
-	mot_actuator_on_vibrate_start();
-#endif
-
 	/* play go and start f0 calibration */
 	aw8695_haptic_play_go(aw8695, true);
 
@@ -1598,12 +1584,6 @@ static int aw8695_haptic_f0_calibration(struct aw8695 *aw8695)
 	aw8695_i2c_write_bits(aw8695, AW8695_REG_SYSCTRL,
 			      AW8695_BIT_SYSCTRL_PLAY_MODE_MASK, AW8695_BIT_SYSCTRL_PLAY_MODE_RAM);
 	aw8695_haptic_stop(aw8695);
-
-#ifdef CONFIG_AF_NOISE_ELIMINATION
-	pr_info("%s: %d: mot_actuator_on_vibrate_stop, duration=%d, haptic_mode=%d, play_mode=%hhu \n", __func__,__LINE__
-		,aw8695->duration,aw8695->haptic_mode,aw8695->play_mode);
-	mot_actuator_on_vibrate_stop();
-#endif
 
 	return ret;
 }
@@ -1968,38 +1948,12 @@ static void aw8695_vibrate(struct aw8695 *aw8695, int value)
 			if (aw8695->seq[0] == 0)
 				aw8695->seq[0] = 0x01;
 			aw8695->index = 0x01;
-#ifdef CONFIG_AW8965_VIBRATOR_SHORT_WAV_ENABLE
-			/*If duration < 100ms, use four waveforms corresponding to weakest, weak, medium, strong*/
-			if(value < 12){
-				aw8695_haptic_set_bst_vol(aw8695, 0x2);
-				aw8695_haptic_set_wav_seq(aw8695, 0x00, 4);
-			}
-			else if(value < 25) {
-				aw8695_haptic_set_bst_vol(aw8695, 0x1e);
-				aw8695_haptic_set_wav_seq(aw8695, 0x00, 4);
-			}
-			else if(value < 38) {
-				aw8695_haptic_set_bst_vol(aw8695, 0x1);
-				aw8695_haptic_set_wav_seq(aw8695, 0x00, 3);
-			}
-			else if(value < 100) {
-				aw8695_haptic_set_bst_vol(aw8695, 0x1f);
-				aw8695_haptic_set_wav_seq(aw8695, 0x00, 1);
-			}
-#else
 			aw8695_haptic_set_wav_seq(aw8695, 0x00, aw8695->seq[0]);
-#endif
 			aw8695_haptic_set_wav_loop(aw8695, 0x00, 0x00);
 			aw8695_haptic_ram_vbat_comp(aw8695, false);
 			aw8695_haptic_play_wav_seq(aw8695, 0x01);
 			break;
 		case HAPTIC_LONG:
-#ifdef CONFIG_AF_NOISE_ELIMINATION
-			pr_info("%s: %d: mot_actuator_on_vibrate_start, duration=%d, haptic_mode=%d, play_mode=%hhu \n", __func__,__LINE__
-				,aw8695->duration,aw8695->haptic_mode,aw8695->play_mode);
-			is_af_enabled = true;
-			mot_actuator_on_vibrate_start();
-#endif
 			aw8695->duration = value;
 			/* wav index config */
 			aw8695->index = 0x02;

@@ -37,7 +37,6 @@
 #include <linux/completion.h>
 #include <linux/workqueue.h>
 #include <linux/version.h>
-#include <linux/blk_types.h>
 
 #define MAX_UTAG_SIZE 1024
 #define MAX_UTAG_NAME 32
@@ -50,6 +49,7 @@
 #define DEFAULT_ROOT "config"
 #define HW_ROOT "hw"
 
+static const struct file_operations utag_fops;
 struct ctrl;
 
 enum utag_flag {
@@ -118,9 +118,6 @@ struct blkdev {
 	const char *name;
 	struct file *filep;
 	size_t size;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(CONFIG_MMI_UTAG_RW_BIO)
-	struct block_device *bdev;
-#endif
 };
 
 struct ctrl {
@@ -148,101 +145,16 @@ struct ctrl {
 	int store_work_result;
 };
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(CONFIG_MMI_UTAG_RW_BIO)
-#include <linux/blkdev.h>
-#include <linux/bio.h>
-
-static struct page *addr_to_page(void *addr)
-{
-	if (is_vmalloc_addr(addr))
-		return vmalloc_to_page(addr);
-	else
-		return virt_to_page(addr);
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-#define NR_BIO_MAX_PAGES BIO_MAX_VECS
-#else
-#define NR_BIO_MAX_PAGES BIO_MAX_PAGES
-#endif
-
-static int utags_submit_bio(struct block_device *bdev, void *buf, int pages, int opf)
-{
-	int i, ret;
-	struct bio *bio;
-	int num, left_pages = pages;
-
-	pr_debug("%s: pages %d left_pages %d begin\n", __func__, pages, left_pages);
-	while (left_pages > 0) {
-		num = (left_pages >= NR_BIO_MAX_PAGES) ? NR_BIO_MAX_PAGES : left_pages;
-
-		bio = bio_alloc(GFP_KERNEL, num);
-		if (!bio)
-			return -ENOMEM;
-
-		bio->bi_iter.bi_sector = (pages - left_pages) * (PAGE_SIZE >> 9);
-		bio->bi_opf = opf;
-		bio_set_dev(bio, bdev);
-
-		for (i = 0; i < num; i++) {
-			if (!bio_add_page(bio, addr_to_page(buf + (pages - left_pages + i) * PAGE_SIZE), PAGE_SIZE, 0)) {
-				bio_put(bio);
-				return -EIO;
-			}
-		}
-
-		ret = submit_bio_wait(bio);
-		if (ret)
-			pr_err("Submit bio err %d,%d,%d", num, opf, ret);
-
-		bio_put(bio);
-		left_pages -= num;
-		pr_debug("%s: pages %d left_pages %d\n", __func__, pages, left_pages);
-	}
-	return ret;
-}
-
-static ssize_t rw_bdev(struct block_device *bdev, void *buf, size_t count, int opf)
-{
-	int ret;
-
-	ret = utags_submit_bio(bdev, buf, 1 << get_order(count), opf);
-	return  ret < 0 ? ret : count;
-}
-
-static ssize_t kernel_read_stub(struct blkdev* cb, void *buf, size_t count)
-{
-	return rw_bdev(cb->bdev, buf, count, REQ_OP_READ);
-}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
-static inline ssize_t kernel_read_stub(struct blkdev* cb, void *addr, size_t count)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
+static inline ssize_t kernel_read_stub(struct file *file, void *addr, size_t count)
 {
 	loff_t pos = 0;
-	return kernel_read(cb->filep, addr, count, &pos);
+	return kernel_read(file, addr, count, &pos);
 }
 #else
-static inline ssize_t kernel_read_stub(struct blkdev* cb, void *addr, size_t count)
+static inline ssize_t kernel_read_stub(struct file *file, void *addr, size_t count)
 {
-	return kernel_read(cb->filep, 0, addr, count);
-}
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(CONFIG_MMI_UTAG_RW_BIO)
-static ssize_t kernel_write_stub(struct blkdev* cb, void *buf, size_t count)
-{
-	return rw_bdev(cb->bdev, buf, count, REQ_OP_WRITE | REQ_SYNC);
-}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
-static inline ssize_t kernel_write_stub(struct blkdev* cb, void *addr, size_t count)
-{
-	loff_t pos = 0;
-	return kernel_write(cb->filep, addr, count, &pos);
-}
-#else
-static inline ssize_t kernel_write_stub(struct blkdev* cb, void *addr, size_t count)
-{
-	loff_t pos = 0;
-	return vfs_write(cb->filep, addr, count, &pos);
+	return kernel_read(file, 0, addr, count);
 }
 #endif
 
@@ -262,32 +174,6 @@ static int add_utag_tail(struct utag *head, char *utag_name, char *utag_type);
 static int lock_open(struct inode *inode, struct file *file);
 static int partition_open(struct inode *inode, struct file *file);
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops utag_fops = {
-	.proc_open = partition_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-	.proc_write = write_utag,
-};
-
-static const struct proc_ops new_fops = {
-	.proc_read = NULL,
-	.proc_write = new_utag,
-};
-
-static const struct proc_ops lock_fops = {
-	.proc_open = lock_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-};
-
-static const struct proc_ops delete_fops = {
-	.proc_read = NULL,
-	.proc_write = delete_utag,
-};
-#else
 static const struct file_operations utag_fops = {
 	.owner = THIS_MODULE,
 	.open = partition_open,
@@ -313,7 +199,6 @@ static const struct file_operations delete_fops = {
 	.read = NULL,
 	.write = delete_utag,
 };
-#endif
 
 /*
  * check utag name
@@ -343,36 +228,29 @@ static int no_show_tag(char *name)
 static int read_head(struct blkdev *cb, struct utag *htag)
 {
 	int bytes;
-	struct frozen_utag *buf;
+	struct frozen_utag buf;
 
 	if (!htag) {
 		pr_err("[%s] null pointer", cb->name);
 		return -EINVAL;
 	}
 
-	buf = vmalloc(UTAG_MIN_TAG_SIZE);
-	if (!buf)
-		return -ENOMEM;
-
-	bytes = kernel_read_stub(cb, (void *) buf, UTAG_MIN_TAG_SIZE);
+	bytes = kernel_read_stub(cb->filep, (void *) &buf, UTAG_MIN_TAG_SIZE);
 	if ((int) UTAG_MIN_TAG_SIZE > bytes) {
 		pr_err("ERR file (%s) read failed ret %d\n", cb->name, bytes);
-		vfree(buf);
 		return -EIO;
 	}
 
-	strlcpy(htag->name, buf->name, MAX_UTAG_NAME - 1);
+	strlcpy(htag->name, buf.name, MAX_UTAG_NAME - 1);
 	if (strncmp(htag->name, UTAG_HEAD, MAX_UTAG_NAME)) {
 		pr_err("[%s] invalid or empty utags partition\n", cb->name);
-		vfree(buf);
 		return -EIO;
 	}
-	htag->flags = ntohl(buf->flags);
-	htag->util = ntohl(buf->util);
-	htag->size = ntohl(buf->size);
+	htag->flags = ntohl(buf.flags);
+	htag->util = ntohl(buf.util);
+	htag->size = ntohl(buf.size);
 	pr_debug("utag file (%s) flags %#x util %#x size %#x\n",
 		cb->name, htag->flags, htag->util, htag->size);
-	vfree(buf);
 	return 0;
 }
 
@@ -451,21 +329,6 @@ static size_t data_size(struct blkdev *cb)
  */
 static int open_utags(struct blkdev *cb)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(CONFIG_MMI_UTAG_RW_BIO)
-	struct block_device *bdev = NULL;
-
-	bdev = blkdev_get_by_path(cb->name, FMODE_READ | FMODE_WRITE, cb);
-
-	if (IS_ERR(bdev)) {
-		pr_err("(%s) failed get block device\n", cb->name);
-		return -EIO;
-	}
-
-	cb->bdev = bdev;
-	cb->size = i_size_read(bdev->bd_inode);
-	cb->filep = NULL;
-	pr_debug("%s: read inode size %lu\n", __func__, cb->size);
-#else
 	struct inode *inode = NULL;
 
 	if (!cb->name)
@@ -503,7 +366,6 @@ static int open_utags(struct blkdev *cb)
 	}
 
 	cb->size = i_size_read(inode->i_bdev->bd_inode);
-#endif
 	pr_debug("[%s] (pid %i) open (%s) success\n",
 		current->comm, current->pid, cb->name);
 	return 0;
@@ -720,11 +582,7 @@ static struct utag *find_first_utag(const struct utag *head, const char *name)
 
 static int proc_utag_file(char *utag_name, char *utag_type,
 	  enum utag_output mode, struct dir_node *dnode,
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-	  const struct proc_ops *fops)
-#else
 	  const struct file_operations *fops)
-#endif
 {
 	struct proc_node *node;
 	struct ctrl *ctrl = dnode->ctrl;
@@ -1069,7 +927,7 @@ static struct utag *load_utags(struct blkdev *cb)
 	if (!data)
 		return NULL;
 
-	ret_bytes = kernel_read_stub(cb, data, bytes);
+	ret_bytes = kernel_read_stub(cb->filep, data, bytes);
 	if (bytes != ret_bytes) {
 		pr_err("(%s) read failed ret %d\n", cb->name, ret_bytes);
 		goto free_data;
@@ -1267,13 +1125,13 @@ static int store_utags(struct ctrl *ctrl, struct utag *tags)
 	size_t tags_size;
 	char *datap = NULL;
 	int rc = 0;
+	mm_segment_t fs;
+	loff_t pos = 0;
+	struct file *fp;
 	struct blkdev *cb = &ctrl->main;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
-	mm_segment_t fs;
 	fs = get_fs();
 	set_fs(KERNEL_DS);
-#endif
 
 	pr_debug("[%s] utags partition blk_sz=%zu\n", ctrl->dir_name, cb->size);
 
@@ -1287,8 +1145,13 @@ static int store_utags(struct ctrl *ctrl, struct utag *tags)
 		rc = -EIO;
 		goto err_free;
 	}
+	fp = cb->filep;
 
-	written = kernel_write_stub(cb, datap, tags_size);
+#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+	written = kernel_write(fp, datap, tags_size, &pos);
+#else
+	written = vfs_write(fp, datap, tags_size, &pos);
+#endif
 	if (written < tags_size) {
 		pr_err("failed to write file (%s), rc=%zu\n",
 			cb->name, written);
@@ -1302,8 +1165,14 @@ static int store_utags(struct ctrl *ctrl, struct utag *tags)
 			rc = -EIO;
 			goto err_free;
 		}
+		fp = cb->filep;
+		pos = 0;
 
-		written = kernel_write_stub(cb, datap, tags_size);
+#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
+		written = kernel_write(fp, datap, tags_size, &pos);
+#else
+		written = vfs_write(fp, datap, tags_size, &pos);
+#endif
 		if (written < tags_size) {
 			pr_err("failed to write file (%s), rc=%zu\n",
 				cb->name, written);
@@ -1314,9 +1183,7 @@ static int store_utags(struct ctrl *ctrl, struct utag *tags)
 err_free:
 	vfree(datap);
 out:
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 	set_fs(fs);
-#endif
 	return rc;
 }
 
@@ -1857,15 +1724,6 @@ static int partition_open(struct inode *inode, struct file *file)
 	return single_open(file, read_utag, PDE_DATA(inode));
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops reload_fops = {
-	.proc_open = reload_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-	.proc_write = reload_write,
-};
-#else
 static const struct file_operations reload_fops = {
 	.owner = THIS_MODULE,
 	.open = reload_open,
@@ -1874,7 +1732,6 @@ static const struct file_operations reload_fops = {
 	.release = single_release,
 	.write = reload_write,
 };
-#endif
 
 static int build_utags_directory(struct ctrl *ctrl)
 {
@@ -1946,7 +1803,7 @@ stop_building_utags:
 #ifdef CONFIG_OF
 static char *bootargs_str;
 
-static int utag_get_bootarg(char *key, char **value, char *prop, char *spl_flag)
+static int utag_get_bootarg(char *key, char **value)
 {
 	const char *bootargs_ptr = NULL;
 	char *idx = NULL;
@@ -1958,7 +1815,7 @@ static int utag_get_bootarg(char *key, char **value, char *prop, char *spl_flag)
 	if (n == NULL)
 		goto err;
 
-	if (of_property_read_string(n, prop, &bootargs_ptr) != 0)
+	if (of_property_read_string(n, "bootargs", &bootargs_ptr) != 0)
 		goto err_putnode;
 
 	bootargs_ptr_len = strlen(bootargs_ptr);
@@ -1975,7 +1832,7 @@ static int utag_get_bootarg(char *key, char **value, char *prop, char *spl_flag)
 		kvpair = strsep(&idx, " ");
 		if (kvpair)
 			if (strsep(&kvpair, "=")) {
-				*value = strsep(&kvpair, spl_flag);
+				*value = strsep(&kvpair, " ");
 				if (*value)
 					err = 0;
 			}
@@ -1987,51 +1844,18 @@ err:
 	return err;
 }
 
-#ifdef CONFIG_BOOT_CONFIG
-static char bootdevice_name[256];
-static int utags_get_bootdevice_from_bootconfig(char **bootconfig_val)
-{
-	static char bootdevice_init = 0;
-	int rc = 0;
-
-	if (bootdevice_init) {
-		*bootconfig_val = bootdevice_name;
-		return 0;
-	}
-
-	rc = utag_get_bootarg("androidboot.bootdevice=", bootconfig_val, "mmi,bootconfig", "\n");
-	if (!rc && *bootconfig_val) {
-		strncpy(bootdevice_name, *bootconfig_val, strlen(*bootconfig_val));
-		bootdevice_init = 1;
-	}
-	return rc;
-}
-#endif
-
 #define PLATFORM_PATH "/dev/block/platform/soc/"
 
 static void utags_bootdevice_expand(const char **name_ptr, const char *name)
 {
-	int rc = -1;
+	int rc;
 	size_t max_len = strlen(name);
 	char *bootdevice = NULL;
 	char *replace, *suffix, *expanded;
 
-	if (name == NULL)
-		return;
-#ifndef CONFIG_BOOT_CONFIG
-	rc = utag_get_bootarg("androidboot.bootdevice=", &bootdevice, "bootargs", " ");
+	rc = utag_get_bootarg("androidboot.bootdevice=", &bootdevice);
 	if (rc || !bootdevice)
 		goto need_no_expansion;
-#else
-	rc = utags_get_bootdevice_from_bootconfig(&bootdevice);
-
-	if (rc || !bootdevice) {
-		rc = utag_get_bootarg("androidboot.bootdevice=", &bootdevice, "bootargs", " ");
-		if (rc || !bootdevice)
-			goto need_no_expansion;
-	}
-#endif
 
 	replace = strnstr(name, "bootdevice", max_len);
 	suffix = strnstr(name, "by-name", max_len);
@@ -2055,7 +1879,7 @@ static void utags_bootdevice_expand(const char **name_ptr, const char *name)
 	return;
 
 need_no_expansion:
-	*name_ptr = kstrdup(name, GFP_KERNEL);
+	*name_ptr = name;
 }
 
 static int utags_dt_init(struct platform_device *pdev)
@@ -2120,7 +1944,7 @@ static void clear_utags_directory(struct ctrl *ctrl)
 }
 
 
-#define UTAGS_QNAME_SIZE 16
+#define UTAGS_QNAME_SIZE 10
 static int utags_probe(struct platform_device *pdev)
 {
 	int rc;
@@ -2206,19 +2030,6 @@ static int utags_remove(struct platform_device *pdev)
 		filp_close(ctrl->main.filep, NULL);
 	if (ctrl->backup.filep)
 		filp_close(ctrl->backup.filep, NULL);
-
-	if (ctrl->main.name)
-		kfree(ctrl->main.name);
-	if (ctrl->backup.name)
-		kfree(ctrl->backup.name);
-
-	if (bootargs_str) {
-		kfree(bootargs_str);
-		bootargs_str = NULL;
-	}
-
-	devm_kfree(&pdev->dev, ctrl);
-	dev_set_drvdata(&pdev->dev, NULL);
 	return 0;
 }
 

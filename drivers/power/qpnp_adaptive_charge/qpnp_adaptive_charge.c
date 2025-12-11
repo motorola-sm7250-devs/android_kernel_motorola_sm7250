@@ -28,9 +28,7 @@
 #define pr_fmt(fmt)	"qpnp_adap_chg-[%s]: " fmt, __func__
 #include <linux/module.h>
 #include <linux/version.h>
-#ifdef USE_MMI_CHARGER
-#include "mmi_charger.h"
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 61))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 61))
 #include <linux/mmi-pmic-voter.h>
 #else
 #include <linux/pmic-voter.h>
@@ -39,8 +37,7 @@
 #include <linux/notifier.h>
 #include <linux/moduleparam.h>
 
-#ifdef USE_MMI_CHARGER
-#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 61))
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 61))
 #define vote(votable, client_str, enabled, val) \
 	mmi_vote(votable, client_str, enabled, val)
 
@@ -51,20 +48,16 @@ static struct adap_chg_data {
 	struct power_supply	*batt_psy;
 	struct power_supply *dc_psy;
 	struct power_supply *usb_psy;
-#ifdef USE_MMI_CHARGER
-#else
 	struct votable	*usb_icl_votable;
 	struct votable	*dc_suspend_votable;
 	struct votable	*fcc_votable;
 	struct votable	*chg_dis_votable;
-#endif
 	int	batt_capacity;
 	struct	notifier_block ps_notif;
 	struct	work_struct update;
 	bool	init_success;
 	bool	charging_suspended;
 	bool	charging_stopped;
-	struct delayed_work	reinit_work;
 } adap_chg_data;
 
 int upper_limit = -1;
@@ -95,23 +88,15 @@ static int get_ps_int_prop(struct power_supply *psy, enum power_supply_property 
 static void suspend_charging(bool on)
 {
 	if(!adap_chg_data.charging_suspended && on) {
-#ifdef USE_MMI_CHARGER
-		mmi_vote_charger_suspend(ADAPTIVE_CHARGING_VOTER, on);
-#else
 		vote(adap_chg_data.usb_icl_votable, ADAPTIVE_CHARGING_VOTER, true, 0);
 		vote(adap_chg_data.dc_suspend_votable, ADAPTIVE_CHARGING_VOTER, true, 0);
-#endif
 		adap_chg_data.charging_suspended = true;
 		pr_info("Set suspended on\n");
 	}
 
 	if(adap_chg_data.charging_suspended && !on) {
-#ifdef USE_MMI_CHARGER
-		mmi_vote_charger_suspend(ADAPTIVE_CHARGING_VOTER, on);
-#else
 		vote(adap_chg_data.usb_icl_votable, ADAPTIVE_CHARGING_VOTER, false, 0);
 		vote(adap_chg_data.dc_suspend_votable, ADAPTIVE_CHARGING_VOTER, false, 0);
-#endif
 		adap_chg_data.charging_suspended = false;
 		pr_info("Set suspended off");
 	}
@@ -121,23 +106,15 @@ static void suspend_charging(bool on)
 static void stop_charging(bool on)
 {
 	if(!adap_chg_data.charging_stopped && on) {
-#ifdef USE_MMI_CHARGER
-		mmi_vote_charging_disable(ADAPTIVE_CHARGING_VOTER, on);
-#else
 		vote(adap_chg_data.fcc_votable, ADAPTIVE_CHARGING_VOTER, true, 0);
 		vote(adap_chg_data.chg_dis_votable, ADAPTIVE_CHARGING_VOTER, true, 0);
-#endif
 		adap_chg_data.charging_stopped = true;
 		pr_info("Set stop charging on\n");
 	}
 
 	if(adap_chg_data.charging_stopped && !on) {
-#ifdef USE_MMI_CHARGER
-		mmi_vote_charging_disable(ADAPTIVE_CHARGING_VOTER, on);
-#else
 		vote(adap_chg_data.fcc_votable, ADAPTIVE_CHARGING_VOTER, false, 0);
 		vote(adap_chg_data.chg_dis_votable, ADAPTIVE_CHARGING_VOTER, false, 0);
-#endif
 		adap_chg_data.charging_stopped = false;
 		pr_info("Set stop charging off\n");
 	}
@@ -158,13 +135,9 @@ static void update(struct adap_chg_data *data)
 	if (upper_limit != -1) {
 		/* If no lower limit is defined, we are in Auto Mode */
 		if (lower_limit == -1) {
-#ifdef ADAPTIVE_TOLERANCE_OPTIMIZATION
-			if (data->batt_capacity > (upper_limit + 2)) {
-#else
-                        if (data->batt_capacity > (upper_limit + 1)) {
-#endif
+			if (data->batt_capacity > (upper_limit + 1)) {
 				suspend_charging(true);
-				stop_charging(true);
+				stop_charging(false);
 			} else if (data->batt_capacity == (upper_limit + 1)) {
 				suspend_charging(false);
 				stop_charging(true);
@@ -267,19 +240,12 @@ static int get_blocking(char *buffer, const struct kernel_param *kp)
 	bool usb_connected = false;
 
 	if (adap_chg_data.init_success) {
-#ifdef USE_MMI_CHARGER
-		usb_connected = (get_ps_int_prop(adap_chg_data.usb_psy,
-			POWER_SUPPLY_PROP_ONLINE) > 0 ? true : false);
-
-		dc_connected = (get_ps_int_prop(adap_chg_data.dc_psy,
-			POWER_SUPPLY_PROP_ONLINE) > 0 ? true : false);
-#else
 		usb_connected = (get_ps_int_prop(adap_chg_data.usb_psy,
 			POWER_SUPPLY_PROP_PRESENT) > 0 ? true : false);
 
 		dc_connected = (get_ps_int_prop(adap_chg_data.dc_psy,
 			POWER_SUPPLY_PROP_PRESENT) > 0 ? true : false);
-#endif
+
 		blocking = ((adap_chg_data.charging_suspended || adap_chg_data.charging_stopped) &&
 			(dc_connected || usb_connected));
 	} else
@@ -340,10 +306,7 @@ module_param_cb(blocking,
     S_IRUGO
 );
 
-#define ADAP_INIT_SUCCESS 0
-#define ADAP_INIT_FAILED 1
-#define ADAP_INIT_RERUN 2
-static int qpnp_adap_chg_init_work(void)
+static int __init qpnp_adap_chg_init(void)
 {
 	upper_limit = -1;
 	lower_limit = -1;
@@ -354,24 +317,18 @@ static int qpnp_adap_chg_init_work(void)
 	adap_chg_data.batt_psy = power_supply_get_by_name("battery");
 	if (!adap_chg_data.batt_psy) {
 		pr_err("Failed to get battery power supply\n");
-		goto psy_fail;
+		goto fail;
 	}
 
 	adap_chg_data.usb_psy = power_supply_get_by_name("usb");
 	if (!adap_chg_data.usb_psy) {
 		pr_err("Failed to get usb power supply\n");
-		goto psy_fail;
+		goto fail;
 	}
 
-#ifdef USE_MMI_CHARGER
-	adap_chg_data.dc_psy = power_supply_get_by_name("wireless");
-	if (!adap_chg_data.dc_psy)
-		pr_info("No wireless power supply found\n");
-#else
 	adap_chg_data.dc_psy = power_supply_get_by_name("dc");
 	if (!adap_chg_data.dc_psy)
 		pr_info("No dc power supply found\n");
-#endif
 
 	adap_chg_data.batt_capacity = get_ps_int_prop(adap_chg_data.batt_psy,
 		POWER_SUPPLY_PROP_CAPACITY);
@@ -380,8 +337,6 @@ static int qpnp_adap_chg_init_work(void)
 		goto fail;
 	}
 
-#ifdef USE_MMI_CHARGER
-#else
 	adap_chg_data.usb_icl_votable = find_votable("USB_ICL");
 	if (IS_ERR(adap_chg_data.usb_icl_votable)) {
 		pr_err("Failed to get USB_ICL votable\n");
@@ -405,7 +360,6 @@ static int qpnp_adap_chg_init_work(void)
 		pr_err("Failed to get CHG_DISABLE votable\n");
 		goto fail;
 	}
-#endif
 
 	adap_chg_data.ps_notif.notifier_call = ps_notify_callback;
 	if (power_supply_reg_notifier(&adap_chg_data.ps_notif)) {
@@ -417,39 +371,10 @@ static int qpnp_adap_chg_init_work(void)
 	schedule_work(&adap_chg_data.update);
 
 	adap_chg_data.init_success = true;
-	return ADAP_INIT_SUCCESS;
+
+	return 0;
 fail:
-	return ADAP_INIT_FAILED;
-psy_fail:
-	return ADAP_INIT_RERUN;
-
-}
-
-static void adap_reinit_work(struct work_struct *work)
-{
-	int ret = ADAP_INIT_FAILED;
-	ret = qpnp_adap_chg_init_work();
-
-	if (ret == ADAP_INIT_RERUN) {
-		cancel_delayed_work(&adap_chg_data.reinit_work);
-		schedule_delayed_work(&adap_chg_data.reinit_work,
-					      msecs_to_jiffies(5000));
-	}
-}
-
-static int __init qpnp_adap_chg_init(void)
-{
-	int ret = ADAP_INIT_FAILED;
-
-	ret = qpnp_adap_chg_init_work();
-
-	if (ret == ADAP_INIT_RERUN) {
-		INIT_DELAYED_WORK(&adap_chg_data.reinit_work, adap_reinit_work);
-		schedule_delayed_work(&adap_chg_data.reinit_work,
-					      msecs_to_jiffies(5000));
-		return ADAP_INIT_SUCCESS;
-	} else
-		return ret;
+	return 1;
 }
 
 static void qpnp_adap_chg_exit(void)

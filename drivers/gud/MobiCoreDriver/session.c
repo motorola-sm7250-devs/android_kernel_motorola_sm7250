@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2013-2020 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2018 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -33,8 +33,8 @@
 #include <linux/sched/task.h>	/* put_task_struct */
 #endif
 
-#include "mc_user.h"
-#include "mc_admin.h"
+#include "public/mc_user.h"
+#include "public/mc_admin.h"
 
 #if KERNEL_VERSION(3, 5, 0) <= LINUX_VERSION_CODE
 #include <linux/uidgid.h>
@@ -74,7 +74,7 @@ static inline bool gid_lt(kgid_t left, kgid_t right)
 #include "mcp.h"
 #include "client.h"		/* *cbuf* */
 #include "session.h"
-#include "mcimcp.h"		/* WSM_INVALID */
+#include "mci/mcimcp.h"		/* WSM_INVALID */
 
 #define SHA1_HASH_SIZE       20
 
@@ -204,6 +204,7 @@ static int hash_path_and_data(struct task_struct *task, u8 *hash,
 	}
 
 	desc->tfm = tfm;
+	desc->flags = CRYPTO_TFM_REQ_MAY_SLEEP;
 	crypto_shash_init(desc);
 	crypto_shash_update(desc, (u8 *)path, path_len);
 	if (data) {
@@ -267,6 +268,7 @@ static int hash_path_and_data(struct task_struct *task, u8 *hash,
 		goto end;
 	}
 
+	desc.flags = 0;
 	sg_init_one(&sg, path, path_len);
 	crypto_hash_init(&desc);
 	crypto_hash_update(&desc, &sg, path_len);
@@ -434,7 +436,6 @@ struct tee_session *session_create(struct tee_client *client,
 	struct tee_session *session;
 	struct identity mcp_identity;
 
-	memset(&mcp_identity, 0, sizeof(mcp_identity));
 	if (!IS_ERR_OR_NULL(identity)) {
 		/* Check identity method and data. */
 		int ret;
@@ -442,6 +443,8 @@ struct tee_session *session_create(struct tee_client *client,
 		ret = check_prepare_identity(identity, &mcp_identity, current);
 		if (ret)
 			return ERR_PTR(ret);
+	} else {
+		memset(&mcp_identity, 0, sizeof(mcp_identity));
 	}
 
 	/* Allocate session object */
@@ -649,7 +652,7 @@ int session_mc_notify(struct tee_session *session)
  * Sleep until next notification from SWd.
  */
 int session_mc_wait(struct tee_session *session, s32 timeout,
-		    int silent_expiry)
+		    bool silent_expiry)
 {
 	return mcp_wait(&session->mcp_session, timeout, silent_expiry);
 }
@@ -972,7 +975,7 @@ int session_debug_structs(struct kasnprintf_buf *buf,
 {
 	const char *type;
 	u32 session_id;
-	s32 err = 0;
+	s32 err;
 	int i, ret;
 
 	if (session->is_gp) {

@@ -20,7 +20,7 @@
 #include <linux/mm_types.h>	/* struct vm_area_struct */
 #include <linux/uaccess.h>
 
-#include "mc_user.h"
+#include "public/mc_user.h"
 
 #include "main.h"
 #include "user.h"
@@ -90,17 +90,9 @@ static inline int ioctl_check_pointer(unsigned int cmd, int __user *uarg)
 	int err = 0;
 
 	if (_IOC_DIR(cmd) & _IOC_READ)
-#if KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE
 		err = !access_ok(VERIFY_WRITE, uarg, _IOC_SIZE(cmd));
-#else
-		err = !access_ok(uarg, _IOC_SIZE(cmd));
-#endif
 	else if (_IOC_DIR(cmd) & _IOC_WRITE)
-#if KERNEL_VERSION(5, 0, 0) > LINUX_VERSION_CODE
 		err = !access_ok(VERIFY_READ, uarg, _IOC_SIZE(cmd));
-#else
-		err = !access_ok(uarg, _IOC_SIZE(cmd));
-#endif
 
 	if (err)
 		return -EFAULT;

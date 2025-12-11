@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2013-2020 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2018 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -23,29 +23,7 @@
 #include <linux/pagemap.h>
 #include <linux/device.h>
 #include <linux/version.h>
-#ifdef CONFIG_DMA_SHARED_BUFFER
 #include <linux/dma-buf.h>
-#endif
-#ifdef CONFIG_ION
-#ifdef CONFIG_ION_SYSTEM_HEAP /* Android kernel only */
-#if KERNEL_VERSION(5, 4, 0) < LINUX_VERSION_CODE
-#include <linux/ion.h>
-#elif KERNEL_VERSION(4, 11, 12) < LINUX_VERSION_CODE
-#include "../../drivers/staging/android/ion/ion.h"
-#elif KERNEL_VERSION(3, 14, 0) < LINUX_VERSION_CODE
-#include "../../drivers/staging/android/ion/ion_priv.h"
-#endif /* KERNEL_VERSION */
-#else /* CONFIG_ION_SYSTEM_HEAP */
-#if KERNEL_VERSION(5, 4, 0) < LINUX_VERSION_CODE
-#include "../../drivers/staging/android/ion/ion.h"
-#elif KERNEL_VERSION(4, 11, 12) < LINUX_VERSION_CODE
-#include "../../drivers/staging/android/ion/ion.h"
-#elif KERNEL_VERSION(3, 14, 0) < LINUX_VERSION_CODE
-/* very old Android kernel without ION_SYSTEM_HEAP falls here */
-#include "../../drivers/staging/android/ion/ion_priv.h"
-#endif
-#endif /* CONFIG_ION_SYSTEM_HEAP */
-#endif /* CONFIG_ION */
 
 #ifdef CONFIG_XEN
 /* To get the MFN */
@@ -53,9 +31,9 @@
 #include <xen/page.h>
 #endif
 
-#include "mc_user.h"
+#include "public/mc_user.h"
 
-#include "mcimcp.h"
+#include "mci/mcimcp.h"
 
 #include "main.h"
 #include "mcp.h"	/* mcp_buffer_map */
@@ -142,7 +120,7 @@ static inline long gup_local(struct mm_struct *mm, uintptr_t start,
 	return get_user_pages_remote(NULL, mm, start, nr_pages, gup_flags,
 				    pages, NULL);
 }
-#elif KERNEL_VERSION(5, 4, 0) > LINUX_VERSION_CODE
+#else
 static inline long gup_local(struct mm_struct *mm, uintptr_t start,
 			     unsigned long nr_pages, int write,
 			     struct page **pages)
@@ -154,32 +132,6 @@ static inline long gup_local(struct mm_struct *mm, uintptr_t start,
 
 	return get_user_pages_remote(NULL, mm, start, nr_pages, gup_flags,
 				    pages, NULL, NULL);
-}
-#elif KERNEL_VERSION(5, 10, 0) > LINUX_VERSION_CODE
-static inline long gup_local(struct mm_struct *mm, uintptr_t start,
-			     unsigned long nr_pages, int write,
-			     struct page **pages)
-{
-	unsigned int gup_flags = 0;
-
-	gup_flags |= FOLL_LONGTERM;
-	if (write)
-		gup_flags |= FOLL_WRITE;
-
-	return get_user_pages(start, nr_pages, gup_flags, pages, NULL);
-}
-#else
-static inline long gup_local(struct mm_struct *mm, uintptr_t start,
-			     unsigned long nr_pages, int write,
-			     struct page **pages)
-{
-	unsigned int gup_flags = 0;
-
-	gup_flags |= FOLL_LONGTERM;
-	if (write)
-		gup_flags |= FOLL_WRITE;
-
-	return pin_user_pages(start, nr_pages, gup_flags, pages, NULL);
 }
 #endif
 
@@ -303,11 +255,7 @@ static void tee_mmu_delete(struct tee_mmu *mmu)
 #endif
 
 				/* pte_page() cannot return NULL */
-#if KERNEL_VERSION(5, 10, 0) > LINUX_VERSION_CODE
 				put_page(pte_page(pte));
-#else
-				unpin_user_page(pte_page(pte));
-#endif
 			}
 
 			mmu->pages_locked -= nr_pages;
@@ -514,33 +462,20 @@ struct tee_mmu *tee_mmu_create(struct mm_struct *mm,
 			/* Buffer is ION */
 			struct sg_mapping_iter miter;
 			struct page **page_ptr;
-			unsigned int cnt = 0;
-			unsigned int global_cnt = 0;
 
-			page_ptr = pages;
+			page_ptr = &pages[0];
 			sg_miter_start(&miter, mmu->sgt->sgl,
 				       mmu->sgt->nents,
 				       SG_MITER_FROM_SG);
+			while (sg_miter_next(&miter))
+				*page_ptr++ = miter.page;
 
-			while (sg_miter_next(&miter)) {
-				if (((global_cnt) >=
-				    (PTE_ENTRIES_MAX * chunk)) &&
-				    cnt < nr_pages) {
-					page_ptr[cnt] = miter.page;
-					cnt++;
-				}
-				global_cnt++;
-			}
 			sg_miter_stop(&miter);
 		} else if (mm) {
 			long gup_ret;
 
 			/* Buffer was allocated in user space */
-#if KERNEL_VERSION(5, 7, 19) < LINUX_VERSION_CODE
-			down_read(&mm->mmap_lock);
-#else
 			down_read(&mm->mmap_sem);
-#endif
 			/*
 			 * Always try to map read/write from a Linux PoV, so
 			 * Linux creates (page faults) the underlying pages if
@@ -558,11 +493,7 @@ struct tee_mmu *tee_mmu_create(struct mm_struct *mm,
 							   (uintptr_t)reader,
 							   nr_pages, 0, pages);
 			}
-#if KERNEL_VERSION(5, 7, 19) < LINUX_VERSION_CODE
-			up_read(&mm->mmap_lock);
-#else
 			up_read(&mm->mmap_sem);
-#endif
 			if (gup_ret < 0) {
 				ret = gup_ret;
 				mc_dev_err(ret, "failed to get user pages @%p",

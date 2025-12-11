@@ -21,7 +21,7 @@
 #include <linux/sched/clock.h>	/* local_clock */
 #endif
 
-#include "mcifc.h"
+#include "mci/mcifc.h"
 
 #include "platform.h"	/* MC_SMC_FASTCALL */
 #include "main.h"

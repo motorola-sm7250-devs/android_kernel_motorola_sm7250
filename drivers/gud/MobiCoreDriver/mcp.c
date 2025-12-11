@@ -33,14 +33,14 @@
 #include <linux/sched/clock.h>	/* local_clock */
 #endif
 
-#include "mc_user.h"
-#include "mc_admin.h"
+#include "public/mc_user.h"
+#include "public/mc_admin.h"
 
-#include "mcimcp.h"
-#include "mcifc.h"
-#include "mcinq.h"		/* SID_MCP */
-#include "mcitime.h"	/* struct mcp_time */
-#include "mciiwp.h"
+#include "mci/mcimcp.h"
+#include "mci/mcifc.h"
+#include "mci/mcinq.h"		/* SID_MCP */
+#include "mci/mcitime.h"	/* struct mcp_time */
+#include "mci/mciiwp.h"
 
 #include "main.h"
 #include "admin.h"		/* tee_object* for 'blob' */
@@ -182,7 +182,7 @@ static inline bool mcp_session_isrunning(struct mcp_session *session)
  */
 int mcp_wait(struct mcp_session *session, s32 timeout, int silent_expiry)
 {
-	s32 err = 0;
+	s32 err;
 	int ret = 0;
 
 	mutex_lock(&session->notif_wait_lock);
@@ -886,7 +886,7 @@ static int debug_sessions(struct kasnprintf_buf *buf)
 	list_for_each_entry(session, &l_ctx.sessions, list) {
 		const char *state_str;
 		u64 cpu_clk;
-		s32 err = 0;
+		s32 err;
 
 		state_str = nq_session_state(&session->nq_session, &cpu_clk);
 		mcp_get_err(session, &err);

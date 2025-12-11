@@ -38,8 +38,8 @@ static DECLARE_WORK(wdt_timeout_work_struct, wdt_timeout_work);
 static int fire_watchdog_reset_set(void *data, u64 val)
 {
 
-	printk(KERN_ERR "MMI Fire test hardware watchdog reset.\n");
-	printk(KERN_ERR "Please wait ...\n");
+	printk(KERN_WARNING "Fire hardware watchdog reset.\n");
+	printk(KERN_WARNING "Please wait ...\n");
 	if (trigger_wdog_bite) {
 		trigger_wdog_bite();
 	} else {
@@ -54,8 +54,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fire_watchdog_reset_fops,
 
 static int fire_softlockup_reset_set(void *data, u64 val)
 {
-	printk(KERN_ERR "MMI Fire test softlockup watchdog reset.\n");
-	printk(KERN_ERR "Please wait ...\n");
+	printk(KERN_WARNING "Fire softlockup watchdog reset.\n");
+	printk(KERN_WARNING "Please wait ...\n");
 	preempt_disable();
 	while (1)
 	;
@@ -75,9 +75,9 @@ static int watchdog_test_init(void)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0)
 	trigger_wdog_bite = (void *)kallsyms_lookup_name("msm_trigger_wdog_bite");
 #else
-#if IS_ENABLED(CONFIG_QCOM_WATCHDOG_V2)
+#if defined(CONFIG_QCOM_WATCHDOG_V2)
 	trigger_wdog_bite = msm_trigger_wdog_bite;
-#elif IS_ENABLED(CONFIG_QCOM_WDT_CORE)
+#elif defined(CONFIG_QCOM_WDT_CORE)
 	trigger_wdog_bite = qcom_wdt_trigger_bite;
 #else
 	trigger_wdog_bite = NULL;

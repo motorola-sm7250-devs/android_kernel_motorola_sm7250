@@ -18,11 +18,11 @@
 #include <linux/vmalloc.h>
 #include <linux/export.h>
 
-#include "tee_client_api.h"
-#include "mc_user.h"
+#include "public/GP/tee_client_api.h"
+#include "public/mc_user.h"
 
 #include "main.h"
-#include "mcinq.h"	/* TA termination codes */
+#include "mci/mcinq.h"	/* TA termination codes */
 #include "client.h"
 
 /* Macros */
@@ -304,7 +304,7 @@ u32 teec_open_session(struct teec_context *context,
 	if (ret || gp_ret.value != TEEC_SUCCESS) {
 		mc_dev_devel("client_gp_open_session failed(%08x) %08x", ret,
 			     gp_ret.value);
-		if (ret && ret != -ECHILD)
+		if (ret)
 			gp_ret.value = _teec_convert_error(-ret);
 		else if (return_origin)
 			/* Update origin as it's not the API */
@@ -363,7 +363,7 @@ u32 teec_invoke_command(struct teec_session *session,
 	if (ret || gp_ret.value != TEEC_SUCCESS) {
 		mc_dev_devel("client_gp_invoke_command failed(%08x) %08x", ret,
 			     gp_ret.value);
-		if (ret && ret != -ECHILD)
+		if (ret)
 			gp_ret.value = _teec_convert_error(-ret);
 		else if (return_origin)
 			/* Update origin as it's not the API */

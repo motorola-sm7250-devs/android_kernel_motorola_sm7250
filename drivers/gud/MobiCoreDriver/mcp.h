@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2013-2020 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2018 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -16,7 +16,7 @@
 #ifndef _MC_MCP_H_
 #define _MC_MCP_H_
 
-#include "mcloadformat.h"		/* struct identity */
+#include "mci/mcloadformat.h"		/* struct identity */
 #include "nq.h"
 
 struct tee_mmu;
@@ -39,7 +39,7 @@ struct mcp_open_info {
 	size_t			tci_len;
 	struct tee_mmu		*tci_mmu;
 	/* Origin */
-	int			user;
+	bool			user;
 };
 
 /* Structure to hold the TA/driver descriptor to pass to MCP */

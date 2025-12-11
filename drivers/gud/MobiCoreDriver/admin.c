@@ -32,8 +32,8 @@
 #endif
 #include <linux/freezer.h>
 
-#include "mc_user.h"
-#include "mc_admin.h"
+#include "public/mc_user.h"
+#include "public/mc_admin.h"
 
 #include "main.h"
 #include "mmu.h"	/* For load_check and load_token */
@@ -229,7 +229,7 @@ static void request_cancel(void);
 static int request_send(u32 command, const struct mc_uuid_t *uuid, bool is_gp,
 			u32 spid)
 {
-	int counter_ms = 0;
+	int counter = 0;
 	int wait_tens = 0;
 	int ret = 0;
 
@@ -241,15 +241,14 @@ static int request_send(u32 command, const struct mc_uuid_t *uuid, bool is_gp,
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 
-		if (counter_ms == 10000) { /* print every 10s */
+		if (counter++ == 10) {
 			wait_tens++;
 			mc_dev_info("daemon not connected after %d0s, waiting",
 				    wait_tens);
-			counter_ms = 0;
+			counter = 0;
 		}
 
-		msleep(20);
-		counter_ms += 20;
+		ssleep(1);
 		mutex_lock(&g_request.states_mutex);
 	}
 

@@ -27,20 +27,11 @@
 #define USE_SHM_BRIDGE
 #endif
 
-#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
-#include <linux/qcom_scm.h>
-#include <soc/qcom/qseecomi.h>
-#if defined USE_SHM_BRIDGE
-#include <linux/qtee_shmbridge.h>
-#endif
-#elif KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE
 #include <soc/qcom/scm.h>
 #include <soc/qcom/qseecomi.h>
 #if defined USE_SHM_BRIDGE
 #include <soc/qcom/qtee_shmbridge.h>
 #endif
-#endif
-
 /*--------------- Implementation -------------- */
 /* MobiCore Interrupt for Qualcomm (DT IRQ has priority if present) */
 #define MC_INTR_SSIQ	280
@@ -48,7 +39,6 @@
 /* Use SMC for fastcalls */
 #define MC_SMC_FASTCALL
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 4, 0)
 #define SCM_MOBIOS_FNID(s, c) (((((s) & 0xFF) << 8) | ((c) & 0xFF)) \
 		| 0x33000000)
 
@@ -58,20 +48,11 @@
 			TZ_SYSCALL_PARAM_TYPE_VAL, \
 			TZ_SYSCALL_PARAM_TYPE_BUF_RW, \
 			TZ_SYSCALL_PARAM_TYPE_VAL)
-#endif
 
 /* from following file */
 #define SCM_SVC_MOBICORE		250
 #define SCM_CMD_MOBICORE		1
 
-#if KERNEL_VERSION(5, 4, 0) <= LINUX_VERSION_CODE
-extern int trustonic_smc_fastcall(void *fc_generic, size_t size);
-static inline int smc_fastcall(void *fc_generic, size_t size)
-{
-	return trustonic_smc_fastcall(fc_generic, size);
-}
-
-#elif KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE
 static inline int smc_fastcall(void *fc_generic, size_t size)
 {
 #if !defined(USE_SHM_BRIDGE)
@@ -121,7 +102,6 @@ static inline int smc_fastcall(void *fc_generic, size_t size)
 			fc_generic, size);
 #endif
 }
-#endif
 
 /*
  * Do not start the TEE at driver init
@@ -166,6 +146,15 @@ static inline int smc_fastcall(void *fc_generic, size_t size)
  * from which the Gold cores do not support TEE interfaces
  * so that CPU_IDS should list only Silver cores.
  */
+
+#ifdef RSU_SELECT_SILVER_CORES
+#define CPU_SELECTION
+#if defined CPU_SELECTION
+#define NB_CPU 4
+#define CPU_IDS {0x0, 0x1, 0x2, 0x3}
+#endif
+
+#else
 /* Enforce/restrict statically CPUs potentially running TEE
  * (Customize to match platform CPU layout... 0xF0 for big cores only for ex).
  * If not defined TEE dynamically using all platform CPUs (recommended)
@@ -174,5 +163,6 @@ static inline int smc_fastcall(void *fc_generic, size_t size)
  */
 #define PLAT_DEFAULT_TEE_AFFINITY_MASK (0xF)
 #define BIG_CORE_SWITCH_AFFINITY_MASK (0xF)
+#endif /* RSU_SELECT_SILVER_CORES */
 
 #endif /* _MC_PLATFORM_H_ */

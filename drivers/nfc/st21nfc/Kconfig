@@ -5,5 +5,5 @@ config NFC_ST21NFC
          Say Y here if you have a ST21NFC compatible
          chip.
 
-         This driver can also be built as a module. If so, the module
+         This driver can also be built as a module.  If so, the module
          will be called st21nfc.

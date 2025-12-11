@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2013-2020 TRUSTONIC LIMITED
+ * Copyright (c) 2013-2018 TRUSTONIC LIMITED
  * All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or
@@ -26,20 +26,16 @@
 #if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
 #include <linux/sched/clock.h>	/* local_clock */
 #endif
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-#include <linux/timekeeping.h>
-#endif
 
 #include "platform.h"			/* CPU-related information */
 
-#include "mc_user.h"
-#include "mc_linux_api.h"
+#include "public/mc_user.h"
 
-#include "mcifc.h"
-#include "mciiwp.h"
-#include "mcimcp.h"
-#include "mcinq.h"
-#include "mcitime.h"		/* struct mcp_time */
+#include "mci/mcifc.h"
+#include "mci/mciiwp.h"
+#include "mci/mcimcp.h"
+#include "mci/mcinq.h"
+#include "mci/mcitime.h"		/* struct mcp_time */
 
 #include "main.h"
 #include "clock.h"
@@ -50,14 +46,6 @@
 #define NQ_NUM_ELEMS		64
 #define SCHEDULING_FREQ		5	/**< N-SIQ every n-th time */
 #define DEFAULT_TIMEOUT_MS	20000	/* We do nothing on timeout anyway */
-
-/* PLAT_DEFAULT_TEE_AFFINITY_MASK
- * should be defined in platform.h
- * if TEE affinity is not set to all cores
- */
-#ifndef PLAT_DEFAULT_TEE_AFFINITY_MASK
-#define PLAT_DEFAULT_TEE_AFFINITY_MASK (0xFFFF)
-#endif
 
 static struct {
 	struct mutex buffer_mutex;	/* Lock on SWd communication buffer */
@@ -91,8 +79,6 @@ static struct {
 	struct kasnprintf_buf	dump;
 	/* Time */
 	struct mcp_time		*time;
-	/* Protects above shared MCP time */
-	struct mutex		mcp_time_mutex;
 
 	/* Scheduler */
 	struct task_struct	*tee_scheduler_thread;
@@ -109,6 +95,8 @@ static struct {
 		NONE,		/* No specific request */
 		YIELD,		/* Run the SWd */
 		NSIQ,		/* Schedule the SWd */
+		SUSPEND,	/* Suspend the SWd */
+		RESUME,		/* Resume the SWd */
 	}			request;
 	bool			suspended;
 
@@ -116,8 +104,6 @@ static struct {
 	phys_addr_t		log_buffer;
 	u32			log_buffer_size;
 	bool			log_buffer_busy;
-	struct cpumask  current_cpumask;
-	struct mutex cpumask_mutex; /* protect cpumask access */
 } l_ctx;
 
 static inline bool is_iwp_id(u32 id)
@@ -216,26 +202,14 @@ static int nq_scheduler_command(enum sched_command command)
 
 static inline void nq_update_time(void)
 {
-#if KERNEL_VERSION(5, 8, 0) <= LINUX_VERSION_CODE
-	struct timespec64 tm1, tm2;
+	struct timespec tm;
 
-	ktime_get_ts64(&tm1);
-	ktime_get_raw_ts64(&tm2);
-#else
-	struct timespec tm1, tm2;
-
-	getnstimeofday(&tm1);
-	getrawmonotonic(&tm2);
-#endif
-
-	mutex_lock(&l_ctx.mcp_time_mutex);
-	/* set for REE time (current time, may be affected by user timezone) */
-	l_ctx.time->wall_clock_seconds = tm1.tv_sec;
-	l_ctx.time->wall_clock_nsec    = tm1.tv_nsec;
-	/* set for TEE time (absolute time, direct raw counter) */
-	l_ctx.time->monotonic_seconds  = tm2.tv_sec;
-	l_ctx.time->monotonic_nsec     = tm2.tv_nsec;
-	mutex_unlock(&l_ctx.mcp_time_mutex);
+	getnstimeofday(&tm);
+	l_ctx.time->wall_clock_seconds = tm.tv_sec;
+	l_ctx.time->wall_clock_nsec = tm.tv_nsec;
+	getrawmonotonic(&tm);
+	l_ctx.time->monotonic_seconds = tm.tv_sec;
+	l_ctx.time->monotonic_nsec = tm.tv_nsec;
 }
 
 static inline void nq_notif_handler(u32 id, u32 payload)
@@ -656,6 +630,34 @@ void nq_signal_tee_hung(void)
 	nq_scheduler_command(NONE);
 }
 
+static int nq_scheduler_pm_command(enum sched_command command)
+{
+	int ret = -EPERM;
+
+	if (IS_ERR_OR_NULL(l_ctx.tee_scheduler_thread))
+		return -EFAULT;
+
+	mutex_lock(&l_ctx.sleep_mutex);
+
+	/* Send request */
+	nq_scheduler_command(command);
+
+	/* Wait for scheduler to reply */
+	wait_for_completion(&l_ctx.sleep_complete);
+	mutex_lock(&l_ctx.request_mutex);
+	if (command == SUSPEND) {
+		if (l_ctx.suspended)
+			ret = 0;
+	} else {
+		if (!l_ctx.suspended)
+			ret = 0;
+	}
+
+	mutex_unlock(&l_ctx.request_mutex);
+	mutex_unlock(&l_ctx.sleep_mutex);
+	return ret;
+}
+
 static int nq_boot_tee(void)
 {
 	size_t q_len = ALIGN(2 * (sizeof(struct notification_queue_header) +
@@ -849,6 +851,18 @@ static int tee_scheduler(void *arg)
 		case NSIQ:
 			swd_notify = true;
 			break;
+		case SUSPEND:
+			/* Force N_SIQ */
+			swd_notify = true;
+			set_sleep_mode_rq(MC_FLAG_REQ_TO_SLEEP);
+			pm_request = true;
+			break;
+		case RESUME:
+			/* Force N_SIQ */
+			swd_notify = true;
+			set_sleep_mode_rq(MC_FLAG_NO_SLEEP_REQ);
+			pm_request = true;
+			break;
 		}
 
 		l_ctx.request = NONE;
@@ -921,35 +935,24 @@ static int tee_scheduler(void *arg)
 	return ret;
 }
 
-int nq_cpu_off(unsigned int cpu)
-{
-	if ((PLAT_DEFAULT_TEE_AFFINITY_MASK >> cpu) & 0x1)
-		remove_core_from_mask(cpu);
-	return nq_scheduler_command(NSIQ);
-}
-
-int nq_cpu_on(unsigned int cpu)
-{
-	if ((PLAT_DEFAULT_TEE_AFFINITY_MASK >> cpu) & 0x1)
-		add_core_to_mask(cpu);
-	return 0;
-}
-
 int nq_suspend(void)
 {
-	mc_dev_devel("%s called", __func__);
-	return nq_cpu_off(get_cpu());
+	return nq_scheduler_pm_command(SUSPEND);
 }
 
 int nq_resume(void)
 {
-	mc_dev_devel("%s called", __func__);
-	return nq_cpu_on(get_cpu());
+	return nq_scheduler_pm_command(RESUME);
 }
 
 int nq_start(void)
 {
 	int ret;
+#if defined(CPU_IDS)
+	struct cpumask new_mask;
+	unsigned int cpu_id[] = CPU_IDS;
+	int i;
+#endif
 	/* Make sure we have the interrupt before going on */
 #if defined(CONFIG_OF)
 	l_ctx.irq = irq_of_parse_and_map(g_ctx.mcd->of_node, 0);
@@ -995,9 +998,14 @@ int nq_start(void)
 		mc_dev_err(ret, "tee_scheduler thread creation failed");
 		return ret;
 	}
-#if defined(BIG_CORE_SWITCH_AFFINITY_MASK)
-	set_tee_worker_threads_on_big_core(false);
+#if defined(CPU_IDS)
+	cpumask_clear(&new_mask);
+	for (i = 0; i < NB_CPU; i++)
+		cpumask_set_cpu(cpu_id[i], &new_mask);
+	set_cpus_allowed_ptr(l_ctx.tee_scheduler_thread, &new_mask);
+	mc_dev_info("tee_scheduler running only on %d CPU", NB_CPU);
 #endif
+
 	wake_up_process(l_ctx.tee_scheduler_thread);
 
 	wait_for_completion(&l_ctx.boot_complete);
@@ -1022,70 +1030,11 @@ void nq_stop(void)
 	free_irq(l_ctx.irq, NULL);
 }
 
-void add_core_to_mask(unsigned int cpu_id)
-{
-	struct cpumask new_mask;
-
-	mutex_lock(&l_ctx.cpumask_mutex);
-	new_mask = l_ctx.current_cpumask;
-	mc_dev_devel("set cpu %u", cpu_id);
-	cpumask_set_cpu(cpu_id, &new_mask);
-	if (l_ctx.tee_scheduler_thread)
-		set_cpus_allowed_ptr(l_ctx.tee_scheduler_thread, &new_mask);
-	l_ctx.current_cpumask = new_mask;
-	mutex_unlock(&l_ctx.cpumask_mutex);
-}
-
-void remove_core_from_mask(unsigned int cpu_id)
-{
-	struct cpumask new_mask;
-
-	mutex_lock(&l_ctx.cpumask_mutex);
-	new_mask = l_ctx.current_cpumask;
-	mc_dev_devel("remove cpu %u", cpu_id);
-	cpumask_clear_cpu(cpu_id, &new_mask);
-	if (l_ctx.tee_scheduler_thread)
-		set_cpus_allowed_ptr(l_ctx.tee_scheduler_thread, &new_mask);
-	l_ctx.current_cpumask = new_mask;
-	mutex_unlock(&l_ctx.cpumask_mutex);
-}
-
-#if defined(BIG_CORE_SWITCH_AFFINITY_MASK)
-void set_tee_worker_threads_on_big_core(bool big_core)
-{
-	struct cpumask new_mask;
-	unsigned int i;
-
-	mc_dev_devel("%s ", big_core ?
-			"big_affinity" : "default_affinity");
-
-	mc_dev_devel("nr_cpu_ids %d", nr_cpu_ids);
-	cpumask_clear(&new_mask);
-	if (big_core) {
-		for (i = 0; i < nr_cpu_ids; i++) {
-			if ((BIG_CORE_SWITCH_AFFINITY_MASK >> i) & 0x1) {
-				mc_dev_devel("set cpu %u", i);
-				cpumask_set_cpu(i, &new_mask);
-			}
-		}
-	} else {
-		for (i = 0; i < nr_cpu_ids; i++) {
-			if ((PLAT_DEFAULT_TEE_AFFINITY_MASK >> i) & 0x1) {
-				mc_dev_devel("set cpu %u", i);
-				cpumask_set_cpu(i, &new_mask);
-			}
-		}
-	}
-	set_cpus_allowed_ptr(l_ctx.tee_scheduler_thread, &new_mask);
-}
-#endif
-
 int nq_init(void)
 {
 	size_t q_len, mci_len;
 	unsigned long mci;
 	int ret;
-	unsigned int i;
 
 	ret = mc_clock_init();
 	if (ret)
@@ -1147,17 +1096,9 @@ int nq_init(void)
 	/* Scheduler */
 	init_completion(&l_ctx.boot_complete);
 	init_completion(&l_ctx.idle_complete);
+	init_completion(&l_ctx.sleep_complete);
+	mutex_init(&l_ctx.sleep_mutex);
 	mutex_init(&l_ctx.request_mutex);
-	mutex_init(&l_ctx.cpumask_mutex);
-	mutex_lock(&l_ctx.cpumask_mutex);
-	cpumask_clear(&l_ctx.current_cpumask);
-	for (i = 0; i < nr_cpu_ids; i++) {
-		if ((PLAT_DEFAULT_TEE_AFFINITY_MASK >> i) & 0x1) {
-			mc_dev_devel("set cpu %u", i);
-			cpumask_set_cpu(i, &l_ctx.current_cpumask);
-		}
-	}
-	mutex_unlock(&l_ctx.cpumask_mutex);
 	return 0;
 
 err_mci:

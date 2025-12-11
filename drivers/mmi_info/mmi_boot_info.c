@@ -28,7 +28,6 @@
 #include <linux/of.h>
 #include <asm/setup.h>
 #include <linux/seq_file.h>
-#include <linux/version.h>
 #include <soc/qcom/mmi_boot_info.h>
 #include <linux/mmi_annotate.h>
 #include "mmi_info.h"
@@ -69,7 +68,6 @@
 #define BOOTMODE_MAX_LEN 64
 static char bootreason[BOOTREASON_MAX_LEN];
 static char bootmode[BOOTMODE_MAX_LEN];
-
 
 static void mmi_bootarg_setup(void)
 {
@@ -138,7 +136,7 @@ EXPORT_SYMBOL(bi_boot_seq);
  * as passed along from bootloader via ATAG_BL_BUILD_SIG(s)
  */
 
-#define MAX_BL_BUILD_SIG  20
+#define MAX_BL_BUILD_SIG  16
 #define MAX_BLD_SIG_ITEM  20
 #define MAX_BLD_SIG_VALUE 80
 
@@ -240,15 +238,6 @@ static u64 bi_serial(void)
 #define EMIT_SERIAL() \
 		EMIT_BOOTINFO("SERIAL", "0x%llx", serial)
 
-const char *bi_chipid(void)
-{
-	return mmi_chosen_data.chipid;
-}
-EXPORT_SYMBOL(bi_chipid);
-
-#define EMIT_CHIPID() \
-		EMIT_BOOTINFO("CHIPID", "%s", chipid)
-
 const char *bi_bootreason(void)
 {
 	return bootreason;
@@ -275,7 +264,6 @@ static int get_bootinfo(struct seq_file *m, void *v)
 	EMIT_MBM_VERSION();
 	EMIT_BL_BUILD_SIG();
 	EMIT_BOOT_SEQ();
-	EMIT_CHIPID();
 	EMIT_BOOTINFO("Last boot reason", "%s", bootreason);
 
 	return 0;
@@ -288,21 +276,12 @@ static int bootinfo_proc_open(struct inode *inode, struct file *file)
 	return single_open(file, get_bootinfo, PDE_DATA(inode));
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops bootinfo_proc_fops = {
-	.proc_open           = bootinfo_proc_open,
-	.proc_read           = seq_read,
-	.proc_lseek         = seq_lseek,
-	.proc_release        = single_release,
-};
-#else
 static const struct file_operations bootinfo_proc_fops = {
 	.open           = bootinfo_proc_open,
 	.read           = seq_read,
 	.llseek         = seq_lseek,
 	.release        = single_release,
 };
-#endif
 
 int mmi_boot_info_init(void)
 {
@@ -328,7 +307,6 @@ int mmi_boot_info_init(void)
 	mmi_annotate_persist("SERIAL: 0x%llx\n", bi_serial());
 	mmi_annotate_persist("HW_REV: 0x%04x\n", bi_hwrev());
 	mmi_annotate_persist("BOOT_SEQ: %d\n", bi_boot_seq());
-	mmi_annotate_persist("CHIPID: %s\n", bi_chipid());
 	mmi_annotate("POWERUPREASON: 0x%08x\n", bi_powerup_reason());
 	mmi_annotate("Last boot reason: %s\n\n", bi_bootreason());
 
