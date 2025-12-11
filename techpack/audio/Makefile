@@ -27,9 +27,15 @@ ifeq ($(CONFIG_ARCH_SDM660), y)
 include $(srctree)/techpack/audio/config/sdm660auto.conf
 export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/sdm660auto.conf)
 endif
-ifeq ($(filter-out $(CONFIG_NIO_DTB) $(CONFIG_PSTAR_DTB), y),)
-include $(srctree)/techpack/audio/config/konanio.conf
-export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/konanio.conf)
+
+# moto-lito specific configs
+ifeq ($(CONFIG_KIEV_DTB), y)
+include $(srctree)/techpack/audio/config/litokiev.conf
+export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/litokiev.conf)
+endif
+ifeq ($(CONFIG_NAIRO_DTB), y)
+include $(srctree)/techpack/audio/config/litonairo.conf
+export $(shell sed 's/=.*//' $(srctree)/techpack/audio/config/litonairo.conf)
 endif
 
 # Use USERINCLUDE when you must reference the UAPI directories only.
@@ -71,9 +77,20 @@ ifeq ($(CONFIG_ARCH_SDM660), y)
 LINUXINCLUDE    += \
                 -include $(srctree)/techpack/audio/config/sdm660autoconf.h
 endif
-ifeq ($(filter-out $(CONFIG_NIO_DTB) $(CONFIG_PSTAR_DTB), y),)
+
+# moto-lito specific configs
+ifeq ($(CONFIG_KIEV_DTB), y)
 LINUXINCLUDE    += \
-                -include $(srctree)/techpack/audio/config/konanio.h
+                -include $(srctree)/techpack/audio/config/litokiev.h
+endif
+ifeq ($(CONFIG_NAIRO_DTB), y)
+LINUXINCLUDE    += \
+                -include $(srctree)/techpack/audio/config/litonairo_asoc.h \
+                -include $(srctree)/techpack/audio/config/litonairo.h
+endif
+ifeq ($(CONFIG_SMITH_DTB), y)
+LINUXINCLUDE    += \
+                -include $(srctree)/techpack/audio/config/litosmith.h
 endif
 
 obj-y += soc/

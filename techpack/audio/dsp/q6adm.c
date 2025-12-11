@@ -4627,7 +4627,6 @@ int adm_set_ffecns_freeze_event(bool ffecns_freeze_event)
 	return rc;
 }
 EXPORT_SYMBOL(adm_set_ffecns_freeze_event);
-
 #ifdef CONFIG_SND_SOC_AWINIC_AW882XX
 int aw_adm_param_enable(int port_id, int module_id,  int param_id, int enable)
 {

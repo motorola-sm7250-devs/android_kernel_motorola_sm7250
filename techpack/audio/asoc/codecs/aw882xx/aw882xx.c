@@ -1,7 +1,7 @@
 /*
  * aw882xx.c   aw882xx codec module
  *
- * Version: v0.1.17
+ * Version: v0.1.15
  *
  * keep same with AW882XX_VERSION
  *
@@ -14,6 +14,7 @@
  * Free Software Foundation;  either version 2 of the  License, or (at your
  * option) any later version.
  */
+
 #ifdef CONFIG_AW882XX_CODEC
 
 #include <linux/module.h>
@@ -48,7 +49,7 @@
  ******************************************************/
 #define AW882XX_I2C_NAME "aw882xx_smartpa"
 
-#define AW882XX_VERSION "v0.1.17"
+#define AW882XX_VERSION "v0.1.15"
 
 #define AW882XX_RATES SNDRV_PCM_RATE_8000_48000
 #define AW882XX_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | \
@@ -674,10 +675,11 @@ static void aw882xx_reg_loaded(const struct firmware *cont, void *context)
 	kfree(aw882xx_cfg);
 	if (aw882xx->afe_profile) {
 		aw882xx_load_profile_params(aw882xx);
+		aw882xx->need_fade = 0;
 	}
-	aw882xx->need_fade = 0;
 	aw882xx_start(aw882xx);
-	if(aw882xx->afe_profile || aw882xx->fade_flag) {
+
+	if (aw882xx->afe_profile) {
 		aw882xx->need_fade = 1;
 	}
 }
@@ -1083,6 +1085,7 @@ static void aw882xx_volume_set(struct aw882xx *aw882xx, unsigned int value)
 	}
 	/* write value */
 	aw882xx_i2c_write(aw882xx, AW882XX_HAGCCFG4_REG, real_value);
+	pr_debug("%s: set to value = 0x%x\n", __func__, real_value);
 }
 
 static void aw882xx_fade_in_out(struct aw882xx *aw882xx)
@@ -1222,7 +1225,7 @@ static int aw882xx_skt_disable_get(struct snd_kcontrol *kcontrol,
 
 static int aw882xx_skt_set_dsp(int value)
 {
-	int ret;
+        int ret;
 	int port_id = g_aw882xx->afe_rx_portid;
 	int module_id = AW_MODULE_ID_COPP;
 	int param_id =  AW_MODULE_PARAMS_ID_COPP_ENABLE;
@@ -1974,15 +1977,6 @@ static int aw882xx_parse_dt(struct device *dev, struct aw882xx *aw882xx,
 	} else {
 		dev_info(dev, "%s: afe-profile = %d\n",
 			__func__, aw882xx->afe_profile);
-	}
-
-	ret = of_property_read_u32(np, "fade-flag", &aw882xx->fade_flag);
-	if (ret) {
-		aw882xx->fade_flag = 0;
-		dev_err(dev, "%s: fade_flag get failed,use default value!\n", __func__);
-	} else {
-		dev_info(dev, "%s: fade_flag = %d\n",
-			__func__, aw882xx->fade_flag);
 	}
 
 	/*get low vol table cfg*/
@@ -3208,36 +3202,6 @@ static void aw882xx_monitor_work(struct aw882xx *aw882xx)
 	aw882xx_monitor_set_vmax(aw882xx, set_cfg.vmax);
 }
 
-static void aw882xx_monitor_init_gain(struct aw882xx *aw882xx)
-{
-	struct aw882xx_low_vol *vol_cfg = &aw882xx->monitor.vol_cfg;
-	struct aw882xx_low_temp *temp_cfg = &aw882xx->monitor.temp_cfg;
-	struct aw882xx_low_temp set_cfg;
-	int ret;
-
-	if (aw882xx == NULL) {
-		pr_err("%s: pointer is NULL\n", __func__);
-		return;
-	}
-
-	ret = aw882xx_monitor_voltage(aw882xx, vol_cfg);
-	if (ret < 0) {
-		pr_err("%s: monitor voltage failed\n", __func__);
-		return;
-	}
-
-	ret = aw882xx_monitor_temperature(aw882xx, temp_cfg);
-	if (ret < 0) {
-		pr_err("%s: monitor temperature failed\n", __func__);
-		return;
-	}
-
-	memcpy(&set_cfg, temp_cfg, sizeof(struct aw882xx_low_temp));
-
-	aw882xx_monitor_get_cfg(&set_cfg, vol_cfg);
-	aw882xx->cur_gain = set_cfg.gain;
-}
-
 static int aw882xx_get_hmute(struct aw882xx *aw882xx)
 {
 	unsigned int reg_val = 0;
@@ -3282,6 +3246,7 @@ void init_aw882xx_monitor(struct aw882xx_monitor *monitor)
 	monitor->temp_cfg.ipeak = monitor->temp_up_table[0].ipeak;
 	monitor->temp_cfg.gain = monitor->temp_up_table[0].gain;
 	monitor->temp_cfg.vmax = monitor->temp_up_table[0].vmax;
+
 #ifdef AW_DEBUG
 	 monitor->test_vol = 0;
 	 monitor->test_temp = 0;
@@ -3419,7 +3384,7 @@ static int aw882xx_i2c_probe(struct i2c_client *i2c,
 	}
 
 	init_aw882xx_monitor(&aw882xx->monitor);
-	aw882xx_monitor_init_gain(aw882xx);
+
 	init_aw882xx_misc_driver(aw882xx);
 	g_aw882xx = aw882xx;
 
@@ -3428,7 +3393,7 @@ static int aw882xx_i2c_probe(struct i2c_client *i2c,
 	aw882xx->fade_work_start = 0;
 	aw882xx->delayed_time = 0;
 	aw882xx->is_fade_in = 0;
-
+	aw882xx->cur_gain = 0;
 	/*init profile*/
 	mutex_init(&aw882xx->profile.lock);
 	aw882xx->profile.cur_profile = 0;
