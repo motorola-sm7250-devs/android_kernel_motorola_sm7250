@@ -25,9 +25,6 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/mmi_kernel_common.h>
-#ifdef NVT_TOUCH_LAST_TIME
-#include <linux/ktime.h>
-#endif
 
 #ifdef NVT_SENSOR_EN
 #include <linux/sensors.h>
@@ -57,10 +54,6 @@
 
 #include <linux/mmi_wake_lock.h>
 
-#if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
-#include <linux/touchscreen_mmi.h>
-#endif
-
 #define NVT_DEBUG 1
 
 //---GPIO number---
@@ -84,7 +77,6 @@
 #define NVT_LOG(fmt, args...)    pr_info("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
 #endif
 #define NVT_ERR(fmt, args...)    pr_err("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
-#define NVT_DBG(fmt, args...)    pr_debug("[%s] %s %d: " fmt, NVT_SPI_NAME, __func__, __LINE__, ##args)
 
 //---Input device info.---
 #define NVT_TS_NAME "NVTCapacitiveTouchScreen"
@@ -110,12 +102,6 @@ extern const uint16_t touch_key_array[TOUCH_KEY_NUM];
 #define PANEL_REAL_HEIGHT 15768
 #endif
 #endif
-#define EDGE_REJECT_VERTICLE_CMD 0xBA
-#define EDGE_REJECT_LEFT_UP 0xBB
-#define EDGE_REJECT_RIGHT_UP 0xBC
-#define VERTICAL   1
-#define LEFT_UP   2
-#define RIGHT_UP  3
 
 /* Enable only when module have tp reset pin and connected to host */
 #define NVT_TOUCH_SUPPORT_HW_RST 0
@@ -125,7 +111,7 @@ extern const uint16_t touch_key_array[TOUCH_KEY_NUM];
 #define NVT_TOUCH_EXT_PROC 1
 #define NVT_TOUCH_MP 1
 #define MT_PROTOCOL_B 1
-#if defined (NVT_SENSOR_EN) || defined (CONFIG_INPUT_TOUCHSCREEN_MMI)
+#ifdef NVT_SENSOR_EN
 #define WAKEUP_GESTURE 1
 #else
 #define WAKEUP_GESTURE 0
@@ -148,13 +134,17 @@ extern const uint16_t gesture_key_array[];
 #define NVT_TOUCH_ESD_CHECK_PERIOD 1500	/* ms */
 #define NVT_TOUCH_WDT_RECOVERY 1
 
-#define DOUBLE_TAP_GESTURE_MODE_CMD 0x7B
-
 #if NVT_TOUCH_ESD_PROTECT
 extern struct delayed_work nvt_esd_check_work;
 #endif
 
 #ifdef NVT_SENSOR_EN
+/* display state */
+enum display_state {
+	SCREEN_UNKNOWN,
+	SCREEN_OFF,
+	SCREEN_ON,
+};
 struct nvt_sensor_platform_data {
 	struct input_dev *input_sensor_dev;
 	struct sensors_classdev ps_cdev;
@@ -183,7 +173,7 @@ struct nvt_ts_data {
 	struct delayed_work nvt_fwu_work;
 	uint16_t addr;
 	int8_t phys[32];
-	uint8_t bTouchIsAwake;
+
 	uint8_t fw_ver;
 	uint8_t x_num;
 	uint8_t y_num;
@@ -218,33 +208,24 @@ struct nvt_ts_data {
 #ifdef CONFIG_SPI_MT65XX
     struct mtk_chip_config spi_ctrl;
 #endif
-#ifdef WAKEUP_GESTURE
-	bool gesture_enabled;
+#ifdef NVT_SENSOR_EN
 	bool wakeable;
-	struct timer_list gt_timer;
-	atomic_t gesture_id;
-#endif
-#ifdef NVT_TOUCH_LAST_TIME
-	ktime_t last_event_time;
-#endif
+	bool should_enable_gesture;
+	bool gesture_enabled;
 #ifdef NOVATECH_PEN_NOTIFIER
 	bool fw_ready_flag;
 	int nvt_pen_detect_flag;
 	struct notifier_block pen_notif;
 #endif
-#ifdef NVT_SENSOR_EN
-	bool should_enable_gesture;
+	enum display_state screen_state;
+	struct mutex state_mutex;
 	struct nvt_sensor_platform_data *sensor_pdata;
 #endif
 #ifdef PALM_GESTURE
 	bool palm_enabled;
 #endif
-#ifdef EDGE_SUPPRESSION
-	uint32_t edge_reject_state;
-#endif
 	char product_id[10];
 	uint8_t fw_type;
-	atomic_t loading_fw;
 	uint32_t build_id;
 	uint32_t config_id;
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
@@ -265,22 +246,6 @@ struct nvt_ts_data {
 	struct notifier_block panel_notif;
 #endif
 #endif //version code >= 5.4.0
-
-#if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
-	struct ts_mmi_class_methods *imports;
-#endif
-#ifdef TS_MMI_TOUCH_MULTIWAY_UPDATE_FW
-	int flash_mode;
-#endif
-	uint8_t jitter_cmd[2];	/* /< support report rate switching */
-	bool jitter_ctrl;	/* /< support report rate switching */
-	uint8_t first_filter_cmd[2];	/* /< support report rate switching */
-	bool first_filter_ctrl;	/* /< support report rate switching */
-	uint8_t interpolation_cmd[2];	/* /< report rate interpolation command */
-	bool interpolation_ctrl;	/* /< support report rate interpolation */
-	uint8_t edge_cmd[3];	/* /< edge switching command */
-	uint8_t rotate_cmd;	/* /< rotate switching command */
-	bool edge_ctrl;	/* /< edge rate switching */
 };
 
 #if NVT_TOUCH_PROC
@@ -300,20 +265,17 @@ typedef enum {
 typedef enum {
     EVENT_MAP_HOST_CMD                      = 0x50,
     EVENT_MAP_HANDSHAKING_or_SUB_CMD_BYTE   = 0x51,
-    EVENT_MAP_HOST_CMD_CHECK                = 0x5C,
     EVENT_MAP_RESET_COMPLETE                = 0x60,
     EVENT_MAP_FWINFO                        = 0x78,
     EVENT_MAP_PROJECTID                     = 0x9A,
 } SPI_EVENT_MAP;
 
 #ifdef NVT_SET_TOUCH_STATE
-#ifndef CONFIG_PANEL_NOTIFICATIONS
 #define MAX_PANEL_IDX 2
 enum touch_panel_id {
 	TOUCH_PANEL_IDX_PRIMARY = 0,
 	TOUCH_PANEL_MAX_IDX,
 };
-#endif
 
 enum touch_state {
 	TOUCH_DEEP_SLEEP_STATE = 0,
@@ -350,7 +312,6 @@ void nvt_sw_reset_idle(void);
 void nvt_boot_ready(void);
 void nvt_bld_crc_enable(void);
 void nvt_fw_crc_enable(void);
-void nvt_irq_enable(bool enable);
 int32_t nvt_update_firmware(char *firmware_name);
 int32_t nvt_check_fw_reset_state(RST_COMPLETE_STATE check_reset_state);
 int32_t nvt_get_fw_info(void);
@@ -358,10 +319,6 @@ int32_t nvt_clear_fw_status(void);
 int32_t nvt_check_fw_status(void);
 int32_t nvt_set_page(uint32_t addr);
 int32_t nvt_write_addr(uint32_t addr, uint8_t data);
-int32_t nvt_ts_suspend(struct device *dev);
-int32_t nvt_ts_resume(struct device *dev);
-int nvt_set_charger(uint8_t charger_on_off);
-int32_t nvt_cmd_ext_store(uint8_t cmd, uint8_t subcmd);
 #ifdef NVT_SET_TOUCH_STATE
 int touch_set_state(int state, int panel_idx);
 int check_touch_state(int *state, int panel_idx);
@@ -375,9 +332,4 @@ extern int nvt_mcu_pen_detect_set(uint8_t pen_detect);
 #ifdef PALM_GESTURE
 extern int nvt_palm_set(bool enabled);
 #endif
-#ifdef EDGE_SUPPRESSION
-extern int32_t nvt_edge_reject_set(uint32_t status);
-extern uint8_t nvt_edge_reject_read(void);
-#endif
-void release_all_touches(void);
 #endif /* _LINUX_NVT_TOUCH_H */
