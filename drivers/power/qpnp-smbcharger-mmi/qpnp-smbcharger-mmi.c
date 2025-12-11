@@ -28,6 +28,7 @@
 #include <linux/string.h>
 #include <linux/version.h>
 #include <linux/mmi_wake_lock.h>
+#include <linux/usb/usbpd.h>
 
 #define MODULE_LOG "SMBMMI"
 
@@ -180,7 +181,7 @@ enum {
 #define HEARTBEAT_DUAL_DELAY_OCP_MS 1000
 #define HEARTBEAT_OCP_SETTLE_CNT 7
 #define HEARTBEAT_FACTORY_MS 1000
-#define HEARTBEAT_DISCHARGE_MS 60000
+#define HEARTBEAT_DISCHARGE_MS 100000
 
 #define EMPTY_CYCLES 101
 
@@ -296,12 +297,26 @@ struct smb_mmi_chg_param {
 				    u8 *val_raw);
 };
 
+struct smb_mmi_chg_freq {
+	unsigned int		freq_5V;
+	unsigned int		freq_6V_8V;
+	unsigned int		freq_9V;
+	unsigned int		freq_12V;
+};
+
 struct smb_mmi_params {
 	struct smb_mmi_chg_param	fcc;
 	struct smb_mmi_chg_param	fv;
 	struct smb_mmi_chg_param	usb_icl;
 	struct smb_mmi_chg_param	dc_icl;
 	struct smb_mmi_chg_param	aicl_cont_threshold;
+	struct smb_mmi_chg_param	freq_switcher;
+};
+
+struct mmi_ffc_zone  {
+	int		ffc_max_mv;
+	int		ffc_chg_iterm;
+	int		ffc_qg_iterm;
 };
 
 struct mmi_sm_params {
@@ -316,6 +331,7 @@ struct mmi_sm_params {
 	int			target_fv;
 	int			ocp[MAX_NUM_STEPS];
 	int			demo_mode_prev_soc;
+	struct mmi_ffc_zone	*ffc_zones;
 };
 
 enum charging_limit_modes {
@@ -331,6 +347,7 @@ struct smb_mmi_charger {
 	struct device		*dev;
 	struct regmap 		*regmap;
 	struct smb_mmi_params	param;
+	struct smb_mmi_chg_freq	chg_freq;
 	char			*name;
 	int			smb_version;
 
@@ -395,6 +412,9 @@ struct smb_mmi_charger {
 	bool			*debug_enabled;
 	void			*ipc_log;
 
+	struct usbpd	*pd_handle;
+	int			pd_power_max;
+
 	int			hvdcp_power_max;
 	int			inc_hvdcp_cnt;
 	int			hb_startup_cnt;
@@ -406,7 +426,7 @@ struct smb_mmi_charger {
 #define USBIN_CURRENT_LIMIT_CFG_REG		(USBIN_BASE + 0x70)
 #define DCIN_CURRENT_LIMIT_CFG_REG		(DCIN_BASE + 0x70)
 #define USBIN_CONT_AICL_THRESHOLD_REG		(USBIN_BASE + 0x84)
-
+#define DCDC_FSW_SEL_REG			(DCDC_BASE + 0x50)
 #define AICL_RANGE2_MIN_MV		5600
 #define AICL_RANGE2_STEP_DELTA_MV	200
 #define AICL_RANGE2_OFFSET		16
@@ -449,6 +469,56 @@ int smblib_set_aicl_cont_threshold(struct smb_mmi_chg_param *param,
 	return 0;
 }
 
+/********************
+ * REGISTER SETTERS *
+ ********************/
+ struct smb_buck_boost_freq {
+	int freq_khz;
+	u8 val;
+};
+static const struct smb_buck_boost_freq chg_freq_list[] = {
+	[0] = {
+		.freq_khz	= 2400,
+		.val		= 7,
+	},
+	[1] = {
+		.freq_khz	= 2100,
+		.val		= 8,
+	},
+	[2] = {
+		.freq_khz	= 1600,
+		.val		= 11,
+	},
+	[3] = {
+		.freq_khz	= 1200,
+		.val		= 15,
+	},
+};
+
+int smblib_set_chg_freq(struct smb_mmi_chg_param *param,
+				int val_u, u8 *val_raw)
+{
+	u8 i;
+
+	if (val_u > param->max_u || val_u < param->min_u)
+		return -EINVAL;
+
+	/* Charger FSW is the configured freqency / 2 */
+	val_u *= 2;
+	for (i = 0; i < ARRAY_SIZE(chg_freq_list); i++) {
+		if (chg_freq_list[i].freq_khz == val_u)
+			break;
+	}
+	if (i == ARRAY_SIZE(chg_freq_list)) {
+		pr_err("Invalid frequency %d Hz\n", val_u / 2);
+		return -EINVAL;
+	}
+
+	*val_raw = chg_freq_list[i].val;
+
+	return 0;
+}
+
 static struct smb_mmi_params smb5_pm8150b_params = {
 	.fcc			= {
 		.name   = "fast charge current",
@@ -487,6 +557,14 @@ static struct smb_mmi_params smb5_pm8150b_params = {
 		.get_proc = smblib_get_aicl_cont_threshold,
 		.set_proc = smblib_set_aicl_cont_threshold,
 	},
+	.freq_switcher		= {
+		.name	= "switching frequency",
+		.reg	= DCDC_FSW_SEL_REG,
+		.min_u	= 600,
+		.max_u	= 1200,
+		.step_u	= 400,
+		.set_proc = smblib_set_chg_freq,
+	},
 };
 
 static struct smb_mmi_params smb5_pmi632_params = {
@@ -518,6 +596,14 @@ static struct smb_mmi_params smb5_pmi632_params = {
 		.min_u  = 0,
 		.max_u  = 3000000,
 		.step_u = 50000,
+	},
+	.freq_switcher		= {
+		.name	= "switching frequency",
+		.reg	= DCDC_FSW_SEL_REG,
+		.min_u	= 600,
+		.max_u	= 1200,
+		.step_u	= 400,
+		.set_proc = smblib_set_chg_freq,
 	},
 };
 
@@ -1395,6 +1481,20 @@ static void mmi_charger_power_support(struct smb_mmi_charger *chg)
 	const char *charger_ability = NULL;
 	int retval;
 
+	retval = of_property_read_u32(np, "qcom,pd-power-max",
+				  &chg->pd_power_max);
+	if (retval) {
+		chg->pd_power_max = 0;
+	}
+
+	chg->pd_handle =
+			devm_usbpd_get_by_phandle(chg->dev, "qcom,usbpd-phandle");
+	if (IS_ERR_OR_NULL(chg->pd_handle)) {
+		dev_err(chg->dev, "Error getting the pd phandle %ld\n",
+							PTR_ERR(chg->pd_handle));
+		chg->pd_handle = NULL;
+	}
+
 	if (of_property_read_bool(np, "qcom,force-hvdcp-5v")) {
 		chg->hvdcp_power_max = CHARGER_POWER_15W;
 		return;
@@ -1974,7 +2074,6 @@ static int mmi_increase_vbus_power(struct smb_mmi_charger *chg, int cur_mv)
 		if (rc < 0) {
 			mmi_err(chg, "Couldn't set aicl cont threshold to 9V rc=%d\n", rc);
 		}
-
 		vote(chg->chg_dis_votable, MMI_HB_VOTER, false, 0);
 	}
 
@@ -2047,6 +2146,64 @@ static DEVICE_ATTR(force_hvdcp_power_max, 0644,
 		force_hvdcp_power_max_show,
 		force_hvdcp_power_max_store);
 
+static ssize_t force_pd_power_max_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned long r;
+	unsigned long power;
+	struct platform_device *pdev = to_platform_device(dev);
+	struct smb_mmi_charger *mmi_chip = platform_get_drvdata(pdev);
+
+	r = kstrtoul(buf, 0, &power);
+	if (r) {
+		pr_err("SMBMMI: Invalid pd_power_max value = %lu\n", power);
+		return -EINVAL;
+	}
+
+	if (!mmi_chip) {
+		pr_err("SMBMMI: chip not valid\n");
+		return -ENODEV;
+	}
+
+	if ((power >= CHARGER_POWER_15W) &&
+	    (power <= CHARGER_POWER_20W) &&
+	    (mmi_chip->pd_power_max != power)) {
+		mmi_chip->pd_power_max = power;
+
+		cancel_delayed_work(&mmi_chip->heartbeat_work);
+		schedule_delayed_work(&mmi_chip->heartbeat_work,
+					      msecs_to_jiffies(100));
+		mmi_info(mmi_chip, "Reset pd power max as %d, "
+					"Reschedule heartbeat\n",
+					mmi_chip->pd_power_max);
+	}
+
+	return r ? r : count;
+}
+
+static ssize_t force_pd_power_max_show(struct device *dev,
+				    struct device_attribute *attr,
+				    char *buf)
+{
+	int power;
+	struct platform_device *pdev = to_platform_device(dev);
+	struct smb_mmi_charger *mmi_chip = platform_get_drvdata(pdev);
+
+	if (!mmi_chip) {
+		pr_err("SMBMMI: chip not valid\n");
+		return -ENODEV;
+	}
+
+	power = mmi_chip->pd_power_max;
+
+	return scnprintf(buf, CHG_SHOW_MAX_SIZE, "%d\n", power);
+}
+
+static DEVICE_ATTR(force_pd_power_max, 0644,
+		force_pd_power_max_show,
+		force_pd_power_max_store);
+
 static void mmi_chrg_usb_vin_config(struct smb_mmi_charger *chg, int cur_mv)
 {
 	int rc = -EINVAL;
@@ -2073,6 +2230,7 @@ static void mmi_chrg_usb_vin_config(struct smb_mmi_charger *chg, int cur_mv)
 		mmi_err(chg, "Couldn't read charger type rc=%d\n", rc);
 		return;
 	}
+
 	if (val.intval != POWER_SUPPLY_TYPE_USB_HVDCP_3)
 		return;
 
@@ -2822,6 +2980,49 @@ vote_now:
 	return sched_time;
 }
 
+int mmi_set_prop_to_bms(struct smb_mmi_charger *chg,
+				enum power_supply_property psp,
+				union power_supply_propval *val)
+{
+	int rc;
+
+	if (!chg->bms_psy)
+		return -EINVAL;
+
+	rc = power_supply_set_property(chg->bms_psy, psp, val);
+
+	return rc;
+}
+
+static int mmi_get_ffc_fv(struct smb_mmi_charger *chg, int zone,int batt)
+{
+	union power_supply_propval prop = {0,};
+	int rc;
+	int ffc_max_fv;
+	struct mmi_sm_params *chip = &chg->sm_param[batt];
+
+	if (chip->ffc_zones == NULL
+		|| zone >= chip->num_temp_zones)
+		return 0;
+
+	prop.intval = chip->ffc_zones[zone].ffc_qg_iterm;
+	rc = mmi_set_prop_to_bms(chg,
+			POWER_SUPPLY_PROP_BATT_FULL_CURRENT, &prop);
+	if (rc < 0) {
+		mmi_err(chg, "Set bat full curr fail rc=%d\n", rc);
+		return 0;
+	}
+
+	chip->chrg_iterm = chip->ffc_zones[zone].ffc_chg_iterm;
+	ffc_max_fv = chip->ffc_zones[zone].ffc_max_mv;
+	mmi_err(chg,
+		"FFC temp zone %d, fv %d mV, chg iterm %d mA, qg iterm %d mA\n",
+		  zone, ffc_max_fv, chip->chrg_iterm,
+		  chip->ffc_zones[zone].ffc_qg_iterm);
+
+	return ffc_max_fv;
+}
+
 static void mmi_basic_charge_sm(struct smb_mmi_charger *chip,
 				struct smb_mmi_chg_status *stat)
 {
@@ -2857,7 +3058,11 @@ static void mmi_basic_charge_sm(struct smb_mmi_charger *chip,
 		vote(chip->fv_votable,
 		     BATT_PROFILE_VOTER, false, 0);
 	}
-	max_fv_mv = chip->base_fv_mv;
+
+	max_fv_mv = mmi_get_ffc_fv(chip, prm->pres_temp_zone,BASE_BATT);
+	if (max_fv_mv == 0)
+		max_fv_mv = chip->base_fv_mv;
+	mmi_info(chip,"max_fv_mv:%d\n",max_fv_mv);
 
 	mmi_find_temp_zone(chip, prm, stat->batt_temp);
 	if (prm->pres_temp_zone >=  prm->num_temp_zones)
@@ -3840,6 +4045,7 @@ static int batt_prop_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_DIE_HEALTH:
 	case POWER_SUPPLY_PROP_CYCLE_COUNT:
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		return 1;
 	default:
 		break;
@@ -3909,6 +4115,42 @@ static int parse_mmi_dt(struct smb_mmi_charger *chg)
 		chip->pres_temp_zone = ZONE_NONE;
 		chip->pres_chrg_step = STEP_NONE;
 	}
+
+	if (of_find_property(node, "qcom,mmi-ffc-zones", &byte_len)) {
+		if ((byte_len / sizeof(struct mmi_ffc_zone)
+			!= chip->num_temp_zones)
+			|| ((byte_len / sizeof(u32)) % 3)) {
+			mmi_err(chg,
+				   "DT error wrong mmi ffc zones\n");
+			return -ENODEV;
+		}
+
+		chip->ffc_zones = (struct mmi_ffc_zone *)
+			devm_kzalloc(chg->dev, byte_len, GFP_KERNEL);
+
+		if (chip->ffc_zones == NULL)
+			return -ENOMEM;
+
+		rc = of_property_read_u32_array(node,
+				"qcom,mmi-ffc-zones",
+				(u32 *)chip->ffc_zones,
+				byte_len / sizeof(u32));
+		if (rc < 0) {
+			mmi_err(chg,
+				   "Couldn't read mmi ffc zones rc = %d\n",
+				   rc);
+			return rc;
+		}
+
+		for (i = 0; i < chip->num_temp_zones; i++) {
+			mmi_err(chg,
+				"FFC:Zone %d,Volt %d,Ich %d,Iqg %d", i,
+				 chip->ffc_zones[i].ffc_max_mv,
+				 chip->ffc_zones[i].ffc_chg_iterm,
+				 chip->ffc_zones[i].ffc_qg_iterm);
+		}
+	} else
+		chip->ffc_zones = NULL;
 
 	rc = of_property_read_u32(node, "qcom,iterm-ma",
 				  &chip->chrg_iterm);
@@ -4102,6 +4344,11 @@ static int smb_mmi_chg_config_init(struct smb_mmi_charger *chip)
 				pmic_rev_id->pmic_subtype);
 		return -EINVAL;
 	}
+
+	chip->chg_freq.freq_5V			= 600;
+	chip->chg_freq.freq_6V_8V		= 800;
+	chip->chg_freq.freq_9V			= 1050;
+	chip->chg_freq.freq_12V         = 1200;
 
 	pr_err("SMBMMI: PMIC %d is %s\n", chip->smb_version, chip->name);
 
@@ -4424,6 +4671,11 @@ static int smb_mmi_probe(struct platform_device *pdev)
 				&dev_attr_force_hvdcp_power_max);
 	if (rc)
 		mmi_err(chip, "Couldn't create force_hvdcp_power_max\n");
+
+	rc = device_create_file(chip->dev,
+				&dev_attr_force_pd_power_max);
+	if (rc)
+		mmi_err(chip, "Couldn't create force_pd_power_max\n");
 
 	/* Register the notifier for the psy updates*/
 	chip->mmi_psy_notifier.notifier_call = mmi_psy_notifier_call;

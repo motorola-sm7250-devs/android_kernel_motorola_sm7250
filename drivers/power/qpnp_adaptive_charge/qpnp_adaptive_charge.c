@@ -58,6 +58,7 @@ static struct adap_chg_data {
 	bool	init_success;
 	bool	charging_suspended;
 	bool	charging_stopped;
+	struct delayed_work	reinit_work;
 } adap_chg_data;
 
 int upper_limit = -1;
@@ -135,9 +136,9 @@ static void update(struct adap_chg_data *data)
 	if (upper_limit != -1) {
 		/* If no lower limit is defined, we are in Auto Mode */
 		if (lower_limit == -1) {
-			if (data->batt_capacity > (upper_limit + 1)) {
+                        if (data->batt_capacity > (upper_limit + 1)) {
 				suspend_charging(true);
-				stop_charging(false);
+				stop_charging(true);
 			} else if (data->batt_capacity == (upper_limit + 1)) {
 				suspend_charging(false);
 				stop_charging(true);
@@ -245,7 +246,6 @@ static int get_blocking(char *buffer, const struct kernel_param *kp)
 
 		dc_connected = (get_ps_int_prop(adap_chg_data.dc_psy,
 			POWER_SUPPLY_PROP_PRESENT) > 0 ? true : false);
-
 		blocking = ((adap_chg_data.charging_suspended || adap_chg_data.charging_stopped) &&
 			(dc_connected || usb_connected));
 	} else
@@ -306,7 +306,10 @@ module_param_cb(blocking,
     S_IRUGO
 );
 
-static int __init qpnp_adap_chg_init(void)
+#define ADAP_INIT_SUCCESS 0
+#define ADAP_INIT_FAILED 1
+#define ADAP_INIT_RERUN 2
+static int qpnp_adap_chg_init_work(void)
 {
 	upper_limit = -1;
 	lower_limit = -1;
@@ -317,13 +320,13 @@ static int __init qpnp_adap_chg_init(void)
 	adap_chg_data.batt_psy = power_supply_get_by_name("battery");
 	if (!adap_chg_data.batt_psy) {
 		pr_err("Failed to get battery power supply\n");
-		goto fail;
+		goto psy_fail;
 	}
 
 	adap_chg_data.usb_psy = power_supply_get_by_name("usb");
 	if (!adap_chg_data.usb_psy) {
 		pr_err("Failed to get usb power supply\n");
-		goto fail;
+		goto psy_fail;
 	}
 
 	adap_chg_data.dc_psy = power_supply_get_by_name("dc");
@@ -371,10 +374,39 @@ static int __init qpnp_adap_chg_init(void)
 	schedule_work(&adap_chg_data.update);
 
 	adap_chg_data.init_success = true;
-
-	return 0;
+	return ADAP_INIT_SUCCESS;
 fail:
-	return 1;
+	return ADAP_INIT_FAILED;
+psy_fail:
+	return ADAP_INIT_RERUN;
+
+}
+
+static void adap_reinit_work(struct work_struct *work)
+{
+	int ret = ADAP_INIT_FAILED;
+	ret = qpnp_adap_chg_init_work();
+
+	if (ret == ADAP_INIT_RERUN) {
+		cancel_delayed_work(&adap_chg_data.reinit_work);
+		schedule_delayed_work(&adap_chg_data.reinit_work,
+					      msecs_to_jiffies(5000));
+	}
+}
+
+static int __init qpnp_adap_chg_init(void)
+{
+	int ret = ADAP_INIT_FAILED;
+
+	ret = qpnp_adap_chg_init_work();
+
+	if (ret == ADAP_INIT_RERUN) {
+		INIT_DELAYED_WORK(&adap_chg_data.reinit_work, adap_reinit_work);
+		schedule_delayed_work(&adap_chg_data.reinit_work,
+					      msecs_to_jiffies(5000));
+		return ADAP_INIT_SUCCESS;
+	} else
+		return ret;
 }
 
 static void qpnp_adap_chg_exit(void)

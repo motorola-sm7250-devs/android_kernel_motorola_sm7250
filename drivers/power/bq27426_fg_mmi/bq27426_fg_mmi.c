@@ -98,11 +98,12 @@ enum print_reason {
 	PR_MOTO         = BIT(7),
 };
 
-static int __debug_mask = 0xFF;
+static int __debug_mask = 0;
 module_param_named(
 	debug_mask, __debug_mask, int, S_IRUSR | S_IWUSR
 );
 
+#define FG_HEARTBEAT_RATE 60000
 #define	MONITOR_ALARM_CHECK_NS	5000000000
 #define	INVALID_REG_ADDR	0xFF
 #define BQFS_UPDATE_KEY		0x8F91
@@ -190,6 +191,12 @@ static struct batt_chem_id batt_chem_id_arr[] = {
 	{3230, FG_SUBCMD_CHEM_A},
 	{1202, FG_SUBCMD_CHEM_B},
 	{3142, FG_SUBCMD_CHEM_C},
+};
+
+enum temp_source {
+	TEMP_SOURCE_INTERNAL = 0,
+	TEMP_SOURCE_EXTERNAL,
+	TEMP_SOURCE_HOST,
 };
 
 static const struct fg_batt_profile bqfs_image[] = {
@@ -303,6 +310,8 @@ struct bq_fg_chip {
 	unsigned long last_update;
 	const char *batt_profile_name;
 	const char *batt_name;
+	u32 temp_source;
+	int ibat_polority;
 
 	/* debug */
 	int	skip_reads;
@@ -666,7 +675,7 @@ static int fg_unseal(struct bq_fg_chip *bq, u32 key)
 }
 
 
-static int fg_unseal_fa(struct bq_fg_chip *bq, u32 key)
+int fg_unseal_fa(struct bq_fg_chip *bq, u32 key)
 {
 	int ret;
 	int retry = 0;
@@ -785,7 +794,7 @@ static int fg_read_dm_version(struct bq_fg_chip* bq, u8 *ver)
 }
 
 #define	CFG_UPDATE_POLLING_RETRY_LIMIT	50
-static int fg_dm_pre_access(struct bq_fg_chip *bq)
+int fg_dm_pre_access(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -817,7 +826,7 @@ static int fg_dm_pre_access(struct bq_fg_chip *bq)
 }
 EXPORT_SYMBOL_GPL(fg_dm_pre_access);
 
-static int fg_dm_post_access(struct bq_fg_chip *bq)
+int fg_dm_post_access(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -851,7 +860,7 @@ static int fg_dm_enter_cfg_mode(struct bq_fg_chip *bq)
 		return fg_dm_pre_access(bq);
 }
 
-static int fg_dm_exit_cfg_mode(struct bq_fg_chip *bq)
+int fg_dm_exit_cfg_mode(struct bq_fg_chip *bq)
 {
 	int ret;
 	int i = 0;
@@ -889,7 +898,7 @@ EXPORT_SYMBOL_GPL(fg_dm_exit_cfg_mode);
 #define	DM_ACCESS_BLOCK_DATA		0x40
 
 
-static int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
+int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
 							u8 offset, u8 *buf)
 {
 	int ret;
@@ -926,7 +935,7 @@ static int fg_dm_read_block(struct bq_fg_chip *bq, u8 classid,
 }
 EXPORT_SYMBOL_GPL(fg_dm_read_block);
 
-static int fg_dm_write_block(struct bq_fg_chip *bq, u8 classid,
+int fg_dm_write_block(struct bq_fg_chip *bq, u8 classid,
 							u8 offset, u8 *data)
 {
 	int ret;
@@ -1004,19 +1013,25 @@ static int fg_read_fw_version(struct bq_fg_chip *bq)
 	return version;
 }
 
-
+#define BPD_TEMP_THRE (-300)
+static int fg_read_temperature(struct bq_fg_chip *bq);
 static int fg_read_status(struct bq_fg_chip *bq)
 {
 	int ret;
 	u16 flags;
+	int batt_temp;
 
 	ret = fg_read_word(bq, bq->regs[BQ_FG_REG_FLAGS], &flags);
 	if (ret < 0) {
 		return ret;
 	}
 
+	batt_temp = fg_read_temperature(bq) - 2730;
 	mutex_lock(&bq->data_lock);
-	bq->batt_present	= !!(flags & FG_FLAGS_BAT_DET);
+	if (batt_temp > BPD_TEMP_THRE)
+		bq->batt_present	= !!(flags & FG_FLAGS_BAT_DET);
+	else
+		bq->batt_present	= false;
 	bq->batt_ot			= !!(flags & FG_FLAGS_OT);
 	bq->batt_ut			= !!(flags & FG_FLAGS_UT);
 	bq->batt_fc			= !!(flags & FG_FLAGS_FC);
@@ -1290,10 +1305,11 @@ static enum power_supply_property fg_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_HEALTH,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_VOLTAGE_OCV,
+	POWER_SUPPLY_PROP_CHARGE_COUNTER,
 	POWER_SUPPLY_PROP_RESISTANCE_ID,
 	POWER_SUPPLY_PROP_UPDATE_NOW,
 	POWER_SUPPLY_PROP_BATTERY_TYPE,
-	POWER_SUPPLY_PROP_VOLTAGE_OCV,
 	POWER_SUPPLY_PROP_SOH,
 };
 
@@ -1324,7 +1340,7 @@ static int fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		mutex_lock(&bq->data_lock);
 		fg_read_current(bq, &bq->batt_curr);
-		val->intval = -bq->batt_curr * 1000;
+		val->intval = -bq->batt_curr * 1000 * bq->ibat_polority;
 		mutex_unlock(&bq->data_lock);
 		break;
 
@@ -1405,6 +1421,23 @@ static int fg_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LIPO;
 		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
+		ret = fg_read_ocv_voltage(bq);
+		mutex_lock(&bq->data_lock);
+		if (ret >= 0)
+			bq->batt_vocv= ret;
+		val->intval = bq->batt_vocv * 1000;
+		mutex_unlock(&bq->data_lock);
+		break;
+
+	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+		ret = fg_read_rm(bq);
+		mutex_lock(&bq->data_lock);
+		if (ret >= 0)
+			bq->batt_rm = ret;
+		val->intval = bq->batt_rm * 1000;
+		mutex_unlock(&bq->data_lock);
+		break;
 
 	case POWER_SUPPLY_PROP_RESISTANCE_ID:
 		val->intval = bq->connected_rid ;
@@ -1416,14 +1449,6 @@ static int fg_get_property(struct power_supply *psy,
 		if (bqfs_image[bq->batt_id].batt_type_str)
 			val->strval = bqfs_image[bq->batt_id].batt_type_str;
 		else val->strval = "No battery type";
-		break;
-	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
-		ret = fg_read_ocv_voltage(bq);
-		mutex_lock(&bq->data_lock);
-		if (ret >= 0)
-			bq->batt_vocv= ret;
-		val->intval = bq->batt_vocv * 1000;
-		mutex_unlock(&bq->data_lock);
 		break;
 	case POWER_SUPPLY_PROP_SOH:
 		val->intval = fg_read_soh(bq);
@@ -1545,7 +1570,7 @@ static int fg_read_chem_id(struct bq_fg_chip *bq, u16 *chem_id)
 	return ret;
 }
 
-static int fg_change_chem_id(struct bq_fg_chip *bq, u16 new_id)
+int fg_change_chem_id(struct bq_fg_chip *bq, u16 new_id)
 {
 	int ret;
 	u16 old_id;
@@ -1644,7 +1669,7 @@ static int fg_check_update_necessary(struct bq_fg_chip *bq)
 	return 0;
 }
 
-static bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
+bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
 										const bqfs_cmd_t *cmd)
 {
 	int ret;
@@ -1692,7 +1717,7 @@ static bool fg_update_bqfs_execute_cmd(struct bq_fg_chip *bq,
 }
 EXPORT_SYMBOL_GPL(fg_update_bqfs_execute_cmd);
 
-static void fg_update_bqfs(struct bq_fg_chip *bq)
+void fg_update_bqfs(struct bq_fg_chip *bq)
 {
 	int i;
 	const bqfs_cmd_t *image;
@@ -1966,7 +1991,7 @@ static const struct attribute_group fg_attr_group = {
 	.attrs = fg_attributes,
 };
 
-static int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
+int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
 {
 
 	int ret;
@@ -2003,7 +2028,7 @@ static int fg_enable_sleep(struct bq_fg_chip *bq, bool enable)
 }
 EXPORT_SYMBOL_GPL(fg_enable_sleep);
 
-static int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
+int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2036,7 +2061,7 @@ static int fg_set_term_voltage(struct bq_fg_chip *bq, int volt)
 }
 EXPORT_SYMBOL_GPL(fg_set_term_voltage);
 
-static int fg_set_term_curr(struct bq_fg_chip *bq, int val)
+int fg_set_term_curr(struct bq_fg_chip *bq, int val)
 {
 	int ret = -1, curr = 0;
 	u8 rd_buf[64];
@@ -2087,7 +2112,8 @@ static int fg_set_term_curr(struct bq_fg_chip *bq, int val)
 }
 EXPORT_SYMBOL_GPL(fg_set_term_curr);
 
-static int fg_select_external_temp(struct bq_fg_chip *bq)
+#define TEMP_SOURCE_MASK 0x03
+int fg_select_external_temp(struct bq_fg_chip *bq)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2107,7 +2133,8 @@ static int fg_select_external_temp(struct bq_fg_chip *bq)
 		return ret;
 	}
 
-	rd_buf[1] |=0x01;	// set external temp source
+	rd_buf[1] &= ~TEMP_SOURCE_MASK;
+	rd_buf[1] |= (bq->temp_source & TEMP_SOURCE_MASK);
 
 	ret = fg_dm_write_block(bq, 64, 0, rd_buf);
 
@@ -2118,7 +2145,7 @@ static int fg_select_external_temp(struct bq_fg_chip *bq)
 }
 EXPORT_SYMBOL_GPL(fg_select_external_temp);
 
-static int fg_dodateoc_delta_t(struct bq_fg_chip *bq)
+int fg_dodateoc_delta_t(struct bq_fg_chip *bq)
 {
 	int ret;
 	u8 rd_buf[64];
@@ -2188,9 +2215,10 @@ static void debug_fg_dump_registers(struct bq_fg_chip *bq)
 			sprintf(buf + desc, "Reg[%02X] = %d, ", debug_fg_dump_regs[i], val);
 		}
 	}
+	mmi_fg_dbg(bq, PR_DEBUG, "%s\n", buf);
 }
 
-#define ITERM 80
+#define ITERM 200
 static void fg_check_soc(struct bq_fg_chip *bq)
 {
 	int batt_status = 0;
@@ -2212,7 +2240,7 @@ static void fg_check_soc(struct bq_fg_chip *bq)
 		&& bq->batt_curr < ITERM
 		&& (batt_status == POWER_SUPPLY_STATUS_NOT_CHARGING
 			|| batt_status == POWER_SUPPLY_STATUS_CHARGING)) {
-		mmi_fg_err(bq, "Force report soc 100, batt curr %d, batt status %d\n",
+		pr_err("Force report soc 100, batt curr %d, batt status %d\n",
 				bq->batt_curr, batt_status);
 		bq->batt_soc = 100;
 	}
@@ -2318,12 +2346,28 @@ static int bq_parse_dt(struct bq_fg_chip *bq)
 	bq->name = bq->batt_name;
 
 	rc = of_property_read_string(node, "mmi,batt-profile-name", &bq->batt_profile_name);
-	if (rc)
+	if (rc) {
+		mmi_fg_err(bq, "battery profile name is not specified in dts\n");
 		bq->batt_profile_name = NULL;
+		return rc;
+	}
 
 	rc = of_property_read_u32(node,	"design-capacity", &bq->batt_dc_conf);
-	if (rc < 0)
-		bq->batt_dc_conf = 0;;
+	if (rc < 0) {
+		bq->batt_dc_conf = 0;
+		rc = 0;
+	}
+
+	rc = of_property_read_u32(node,	"mmi,temp-source", &bq->temp_source);
+	if (rc < 0) {
+		bq->temp_source = TEMP_SOURCE_EXTERNAL;
+		rc = 0;
+	}
+
+	if (of_property_read_bool(node, "mmi,ibat-invert-polority"))
+		bq->ibat_polority = -1;
+	else
+		bq->ibat_polority = 1;
 
 	return rc;
 }
@@ -2365,7 +2409,7 @@ static void bq_heartbeat_work(struct work_struct *work)
 	debug_fg_dump_registers(chip);
 	queue_delayed_work(chip->heartbeat_wq,
 			&chip->heartbeat_work,
-			msecs_to_jiffies(1000));
+			msecs_to_jiffies(FG_HEARTBEAT_RATE));
 }
 
 static int bq_fg_probe(struct i2c_client *client,
@@ -2420,7 +2464,7 @@ static int bq_fg_probe(struct i2c_client *client,
 	bq->resume_completed = true;
 	bq->irq_waiting = false;
 
-	bq->regmap = regmap_init_i2c(client, &bq27426_regmap_config);
+	bq->regmap = devm_regmap_init_i2c(client, &bq27426_regmap_config);
 	if (IS_ERR(bq->regmap)) {
 		pr_err("Couldn't initialize register regmap rc = %ld\n",
 				PTR_ERR(bq->regmap));
@@ -2432,6 +2476,15 @@ static int bq_fg_probe(struct i2c_client *client,
 	if (ret < 0) {
 		dev_err(&client->dev, "Unable to parse DT nodes\n");
 		goto free_mem;
+	}
+
+	bq->vdd_i2c_vreg = devm_regulator_get_optional(&client->dev, "vdd-i2c");
+	if (IS_ERR_OR_NULL(bq->vdd_i2c_vreg)) {
+		dev_err(&client->dev, "Could not get vdd-i2c power regulator\n");
+	} else {
+		ret = regulator_enable(bq->vdd_i2c_vreg);
+		if (ret)
+			dev_err(&client->dev, "Could not enable vdd-i2c power regulator\n");
 	}
 
 	ret = fg_read_fw_version(bq);
@@ -2556,6 +2609,12 @@ static int bq_fg_remove(struct i2c_client *client)
 
 	debugfs_remove_recursive(bq->debug_root);
 	sysfs_remove_group(&bq->dev->kobj, &fg_attr_group);
+
+	if (!IS_ERR_OR_NULL(bq->vdd_i2c_vreg)) {
+		if (regulator_is_enabled(bq->vdd_i2c_vreg))
+			regulator_disable(bq->vdd_i2c_vreg);
+		devm_regulator_put(bq->vdd_i2c_vreg);
+	}
 
 	return 0;
 }
