@@ -35,7 +35,6 @@
 #define AFE_PARAM_ID_AWDSP_TX_SET_ENABLE	(0x10013D13)
 #define AFE_PARAM_ID_AWDSP_RX_PARAMS            (0x10013D12)
 #endif /* #ifdef CONFIG_SND_SOC_AWINIC_AW882XX */
-
 #define WAKELOCK_TIMEOUT	5000
 #define AFE_CLK_TOKEN	1024
 
@@ -316,8 +315,6 @@ static struct afe_clkinfo_per_port clkinfo_per_port[] = {
 	{ AFE_PORT_ID_QUATERNARY_TDM_RX,
 		MCLK_SRC_INT, Q6AFE_EXT_MCLK_FREQ_DEFAULT, ""},
 	{ AFE_PORT_ID_QUINARY_TDM_RX,
-		MCLK_SRC_INT, Q6AFE_EXT_MCLK_FREQ_DEFAULT, ""},
-	{ AFE_PORT_ID_SENARY_TDM_RX,
 		MCLK_SRC_INT, Q6AFE_EXT_MCLK_FREQ_DEFAULT, ""},
 	{ AFE_PORT_ID_PRIMARY_SPDIF_RX,
 		MCLK_SRC_INT, Q6AFE_EXT_MCLK_FREQ_DEFAULT, ""},
@@ -2497,15 +2494,6 @@ static int afe_spk_prot_prepare(int src_port, int dst_port, int param_id,
 	case AFE_PARAM_ID_SP_V2_EX_VI_FTM_CFG:
 		param_info.module_id = AFE_MODULE_SPEAKER_PROTECTION_V2_EX_VI;
 		break;
-	case AFE_PARAM_ID_SP_V4_VI_CHANNEL_MAP_CFG:
-	case AFE_PARAM_ID_SP_V4_VI_OP_MODE_CFG:
-	case AFE_PARAM_ID_SP_V4_VI_R0T0_CFG:
-	case AFE_PARAM_ID_SP_V4_TH_VI_FTM_CFG:
-	case AFE_PARAM_ID_SP_V4_TH_VI_V_VALI_CFG:
-	case AFE_PARAM_ID_SP_V4_EX_VI_MODE_CFG:
-	case AFE_PARAM_ID_SP_V4_EX_VI_FTM_CFG:
-		param_info.module_id = AFE_MODULE_SPEAKER_PROTECTION_V4_VI;
-		break;
 #ifdef CONFIG_SND_SOC_AWINIC_AW882XX
 	case AFE_PARAM_ID_AWDSP_RX_SET_ENABLE:
 	case AFE_PARAM_ID_AWDSP_RX_PARAMS:
@@ -2515,6 +2503,15 @@ static int afe_spk_prot_prepare(int src_port, int dst_port, int param_id,
 		param_info.module_id = AFE_MODULE_ID_AWDSP_TX;
 		break;
 #endif	/*CONFIG_SND_SOC_AWINIC_AW882XX*/
+	case AFE_PARAM_ID_SP_V4_VI_CHANNEL_MAP_CFG:
+	case AFE_PARAM_ID_SP_V4_VI_OP_MODE_CFG:
+	case AFE_PARAM_ID_SP_V4_VI_R0T0_CFG:
+	case AFE_PARAM_ID_SP_V4_TH_VI_FTM_CFG:
+	case AFE_PARAM_ID_SP_V4_TH_VI_V_VALI_CFG:
+	case AFE_PARAM_ID_SP_V4_EX_VI_MODE_CFG:
+	case AFE_PARAM_ID_SP_V4_EX_VI_FTM_CFG:
+		param_info.module_id = AFE_MODULE_SPEAKER_PROTECTION_V4_VI;
+		break;
 	default:
 		pr_err("%s: default case 0x%x\n", __func__, param_id);
 		goto fail_cmd;
@@ -3805,9 +3802,10 @@ int aw_send_afe_rx_module_enable(uint32_t rx_port_id, void *buf, int cmd_size)
 		return -EINVAL;
 
 	memcpy(&config, buf, cmd_size);
-//yao
+
 	if (afe_spk_prot_prepare(rx_port_id, 0,
-		AFE_PARAM_ID_AWDSP_RX_SET_ENABLE, &config, sizeof(union afe_spkr_prot_config))) {
+		AFE_PARAM_ID_AWDSP_RX_SET_ENABLE, &config,
+		  sizeof(union afe_spkr_prot_config))) {
 		pr_err("%s: set bypass failed \n", __func__);
 		return -EINVAL;
 	}
@@ -3824,7 +3822,8 @@ int aw_send_afe_tx_module_enable(uint32_t tx_port_id, void *buf, int cmd_size)
 	memcpy(&config, buf, cmd_size);
 
 	if (afe_spk_prot_prepare(tx_port_id, 0,
-		AFE_PARAM_ID_AWDSP_TX_SET_ENABLE, &config, sizeof(union afe_spkr_prot_config))) {
+		AFE_PARAM_ID_AWDSP_TX_SET_ENABLE, &config,
+		  sizeof(union afe_spkr_prot_config))) {
 		pr_err("%s: set bypass failed \n", __func__);
 		return -EINVAL;
 	}
@@ -3833,7 +3832,7 @@ int aw_send_afe_tx_module_enable(uint32_t tx_port_id, void *buf, int cmd_size)
 EXPORT_SYMBOL(aw_send_afe_tx_module_enable);
 
 int aw_send_afe_cal_apr(uint32_t rx_port_id, uint32_t tx_port_id,
-						uint32_t param_id, void *buf, int cmd_size, bool write)
+					uint32_t param_id, void *buf, int cmd_size, bool write)
 {
 	int32_t result = 0;
 	uint32_t port_id = rx_port_id;
