@@ -155,6 +155,12 @@ extern struct delayed_work nvt_esd_check_work;
 #endif
 
 #ifdef NVT_SENSOR_EN
+/* display state */
+enum display_state {
+	SCREEN_UNKNOWN,
+	SCREEN_OFF,
+	SCREEN_ON,
+};
 struct nvt_sensor_platform_data {
 	struct input_dev *input_sensor_dev;
 	struct sensors_classdev ps_cdev;
@@ -221,8 +227,6 @@ struct nvt_ts_data {
 #ifdef WAKEUP_GESTURE
 	bool gesture_enabled;
 	bool wakeable;
-	struct timer_list gt_timer;
-	atomic_t gesture_id;
 #endif
 #ifdef NVT_TOUCH_LAST_TIME
 	ktime_t last_event_time;
@@ -234,6 +238,8 @@ struct nvt_ts_data {
 #endif
 #ifdef NVT_SENSOR_EN
 	bool should_enable_gesture;
+	enum display_state screen_state;
+	struct mutex state_mutex;
 	struct nvt_sensor_platform_data *sensor_pdata;
 #endif
 #ifdef PALM_GESTURE
@@ -307,13 +313,11 @@ typedef enum {
 } SPI_EVENT_MAP;
 
 #ifdef NVT_SET_TOUCH_STATE
-#ifndef CONFIG_PANEL_NOTIFICATIONS
 #define MAX_PANEL_IDX 2
 enum touch_panel_id {
 	TOUCH_PANEL_IDX_PRIMARY = 0,
 	TOUCH_PANEL_MAX_IDX,
 };
-#endif
 
 enum touch_state {
 	TOUCH_DEEP_SLEEP_STATE = 0,

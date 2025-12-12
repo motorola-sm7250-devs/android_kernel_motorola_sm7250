@@ -26,9 +26,7 @@
 #include <linux/of_irq.h>
 #include <linux/power_supply.h>
 #include <linux/version.h>
-#ifdef CONFIG_SPI_SM8450
 #include <linux/spi/spi-msm-geni.h>
-#endif
 
 #ifndef CONFIG_INPUT_TOUCHSCREEN_MMI
 #if ((LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)) || defined(NVT_CONFIG_DRM_PANEL))
@@ -267,12 +265,6 @@ const uint16_t gesture_key_array[] = {
 	KEY_POWER,  //GESTURE_SLIDE_LEFT
 	KEY_POWER,  //GESTURE_SLIDE_RIGHT
 };
-
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-/* Double tap detection resources */
-#define DT2W_TIME_MS 500
-static s64 tap_time_pre = 0;
-#endif
 #endif
 
 #ifdef CONFIG_MTK_SPI
@@ -1115,30 +1107,6 @@ static void nvt_flash_proc_deinit(void)
 /* function page definition */
 #define FUNCPAGE_GESTURE         1
 
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-static inline bool is_gesture_enabled(uint8_t gesture_id)
-{
-	unsigned char gesture_type = 0;
-	bool rc = false;
-	if (ts->imports && ts->imports->get_gesture_type) {
-		ts->imports->get_gesture_type(&ts->client->dev, &gesture_type);
-		switch (gesture_id) {
-		case GESTURE_SINGLE_CLICK:
-			rc = gesture_type & TS_MMI_GESTURE_SINGLE;
-			break;
-		case GESTURE_DOUBLE_CLICK:
-			rc = gesture_type & TS_MMI_GESTURE_DOUBLE;
-			break;
-		default:
-			break;
-		}
-	}
-	return rc;
-}
-#endif
-
-static void nvt_ts_wakeup_gesture_report_timer(struct timer_list *t);
-
 /*******************************************************
 Description:
 	Novatek touchscreen wake up gesture key report function.
@@ -1148,11 +1116,11 @@ return:
 *******************************************************/
 void nvt_ts_wakeup_gesture_report(uint8_t gesture_id, uint8_t *data)
 {
+	uint32_t keycode = 0;
 	uint8_t func_type = data[2];
 	uint8_t func_id = data[3];
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	s64 now = ktime_to_ms(ktime_get());
-	unsigned long timeout = 1;
+#ifdef NVT_SENSOR_EN
+	static int report_cnt = 0;
 #endif
 
 	/* support fw specifal data protocol */
@@ -1163,42 +1131,8 @@ void nvt_ts_wakeup_gesture_report(uint8_t gesture_id, uint8_t *data)
 		return;
 	}
 
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	/* NOTE: FW reports single click as double click */
-	if (gesture_id == GESTURE_DOUBLE_CLICK) {
-		if (now - tap_time_pre > DT2W_TIME_MS) {
-			tap_time_pre = now;
-			gesture_id = GESTURE_SINGLE_CLICK;
-			if (is_gesture_enabled(GESTURE_DOUBLE_CLICK)) {
-				timeout = msecs_to_jiffies(DT2W_TIME_MS);
-				NVT_DBG("Delay single click as double click is enabled\n");
-			}
-		}
-
-		/* FW doesn't check for us */
-		if (!is_gesture_enabled(gesture_id)) {
-			NVT_DBG("gesture_id = %d not enabled, skip.\n", gesture_id);
-			return;
-		}
-	}
-#endif
-
 	NVT_LOG("gesture_id = %d\n", gesture_id);
-	atomic_set(&ts->gesture_id, gesture_id);
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	mod_timer(&ts->gt_timer, jiffies + timeout);
-#else
-	nvt_ts_wakeup_gesture_report_timer(&ts->gt_timer);
-#endif
-}
 
-static void nvt_ts_wakeup_gesture_report_timer(struct timer_list __always_unused *t)
-{
-	uint32_t keycode = 0;
-	uint8_t gesture_id = atomic_read(&ts->gesture_id);
-#ifdef NVT_SENSOR_EN
-	static int report_cnt = 0;
-#endif
 	switch (gesture_id) {
 		case GESTURE_WORD_C:
 			NVT_DBG("Gesture : Word-C.\n");
@@ -2196,6 +2130,7 @@ static int nvt_sensor_set_enable(struct sensors_classdev *sensors_cdev,
 		unsigned int enable)
 {
 	NVT_LOG("Gesture set enable %d!", enable);
+	mutex_lock(&ts->state_mutex);
 	if (enable == 1) {
 		ts->should_enable_gesture = true;
 	} else if (enable == 0) {
@@ -2203,6 +2138,7 @@ static int nvt_sensor_set_enable(struct sensors_classdev *sensors_cdev,
 	} else {
 		NVT_LOG("unknown enable symbol\n");
 	}
+	mutex_unlock(&ts->state_mutex);
 	return 0;
 }
 
@@ -2817,9 +2753,7 @@ return:
 static int32_t nvt_ts_probe(struct spi_device *client)
 {
 	int32_t ret = 0;
-#ifdef CONFIG_SPI_SM8450
 	struct spi_geni_qcom_ctrl_data *spi_param = NULL;
-#endif
 #if ((TOUCH_KEY_NUM > 0) || WAKEUP_GESTURE)
 	int32_t retry = 0;
 #endif
@@ -2865,14 +2799,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		goto err_malloc_rbuf;
 	}
 
-#ifdef CONFIG_SPI_SM8450
 	spi_param = devm_kzalloc(&client->dev, sizeof(spi_param), GFP_KERNEL);
 	if(spi_param == NULL) {
 		NVT_ERR("devm_kzalloc for spi_param failed!\n");
 		ret = -ENOMEM;
 		goto err_malloc_spi_param;
 	}
-#endif
 
 	ts->client = client;
 	spi_set_drvdata(client, ts);
@@ -2929,6 +2861,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 
 	mutex_init(&ts->lock);
 	mutex_init(&ts->xbuf_lock);
+
+#ifdef NVT_SENSOR_EN
+	mutex_init(&ts->state_mutex);
+	//unknown screen state
+	ts->screen_state = SCREEN_UNKNOWN;
+#endif
 
 	//---eng reset before TP_RESX high
 	nvt_eng_reset();
@@ -3062,9 +3000,6 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 #if WAKEUP_GESTURE
 	device_init_wakeup(&ts->input_dev->dev, 1);
 #endif
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	timer_setup(&ts->gt_timer, nvt_ts_wakeup_gesture_report_timer, 0);
-#endif
 #ifdef NVT_SENSOR_EN
 	if (!initialized_sensor) {
 #ifdef CONFIG_HAS_WAKELOCK
@@ -3142,8 +3077,10 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		goto err_create_nvt_fwu_wq_failed;
 	}
 	INIT_DELAYED_WORK(&ts->nvt_fwu_work, Boot_Update_Firmware);
+#ifndef CONFIG_INPUT_TOUCHSCREEN_MMI
 	// please make sure boot update start after display reset(RESX) sequence
-	queue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, msecs_to_jiffies(7000));
+	queue_delayed_work(nvt_fwu_wq, &ts->nvt_fwu_work, msecs_to_jiffies(14000));
+#endif
 #endif
 #ifdef LCM_FAST_LIGHTUP
 	INIT_WORK(&ts_resume_work, nova_resume_work_func);
@@ -3328,9 +3265,6 @@ err_create_nvt_esd_check_wq_failed:
 	}
 err_create_nvt_fwu_wq_failed:
 #endif
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	del_timer_sync(&ts->gt_timer);
-#endif
 #if WAKEUP_GESTURE
 	device_init_wakeup(&ts->input_dev->dev, 0);
 #endif
@@ -3370,13 +3304,11 @@ err_gpio_config_failed:
 err_spi_setup:
 err_ckeck_full_duplex:
 	spi_set_drvdata(client, NULL);
-#ifdef CONFIG_SPI_SM8450
 	if (spi_param) {
 		devm_kfree(&client->dev ,spi_param);
 		spi_param = NULL;
 	}
 err_malloc_spi_param:
-#endif
 	if (ts->rbuf) {
 		kfree(ts->rbuf);
 		ts->rbuf = NULL;
@@ -3476,10 +3408,6 @@ static int32_t nvt_ts_remove(struct spi_device *client)
 	}
 #endif
 
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	del_timer_sync(&ts->gt_timer);
-#endif
-
 #ifndef CONFIG_INPUT_TOUCHSCREEN_MMI
 #if WAKEUP_GESTURE
 	device_init_wakeup(&ts->input_dev->dev, 0);
@@ -3576,10 +3504,6 @@ static void nvt_ts_shutdown(struct spi_device *client)
 	}
 #endif
 
-#ifdef CONFIG_INPUT_NOVA_0FLASH_MMI_EMULATE_DT2W
-	del_timer_sync(&ts->gt_timer);
-#endif
-
 #if WAKEUP_GESTURE
 	device_init_wakeup(&ts->input_dev->dev, 0);
 #endif
@@ -3641,7 +3565,14 @@ int32_t nvt_ts_suspend(struct device *dev)
 {
 	uint8_t buf[4] = {0};
 
+#ifdef NVT_SENSOR_EN
+	mutex_lock(&ts->state_mutex);
+#endif
+
 	if (!ts->bTouchIsAwake) {
+#ifdef NVT_SENSOR_EN
+		mutex_unlock(&ts->state_mutex);
+#endif
 		NVT_LOG("Touch is already suspend\n");
 		return 0;
 	}
@@ -3704,6 +3635,10 @@ int32_t nvt_ts_suspend(struct device *dev)
 	msleep(50);
 
 	NVT_LOG("end\n");
+#ifdef NVT_SENSOR_EN
+	ts->screen_state = SCREEN_OFF;
+	mutex_unlock(&ts->state_mutex);
+#endif
 
 	return 0;
 }
@@ -3717,7 +3652,14 @@ return:
 *******************************************************/
 int32_t nvt_ts_resume(struct device *dev)
 {
+
+#ifdef NVT_SENSOR_EN
+	mutex_lock(&ts->state_mutex);
+#endif
 	if (ts->bTouchIsAwake) {
+#ifdef NVT_SENSOR_EN
+		mutex_unlock(&ts->state_mutex);
+#endif
 		NVT_LOG("Touch is already resume\n");
 		return 0;
 	}
@@ -3791,6 +3733,10 @@ int32_t nvt_ts_resume(struct device *dev)
 
 	NVT_LOG("end\n");
 
+#ifdef NVT_SENSOR_EN
+	ts->screen_state = SCREEN_ON;
+	mutex_unlock(&ts->state_mutex);
+#endif
 	return 0;
 }
 
