@@ -1,2 +1,5 @@
+EXTRA_CFLAGS += -Wall
+EXTRA_CFLAGS += -I$(TOP)/motorola/kernel/modules/include
+
 wl2864c-objs += wl2864c-regulator.o
-obj-$(CONFIG_REGULATOR_WL2864C)	+= wl2864c.o
+obj-m	+= wl2864c.o
