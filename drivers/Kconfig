@@ -239,6 +239,8 @@ source "drivers/mmi_annotate/Kconfig"
 
 source "drivers/mmi_info/Kconfig"
 
+source "drivers/mmi_relay/Kconfig"
+
 source "drivers/tzlog_dump/Kconfig"
 
 source "drivers/watchdog_cpu_ctx/Kconfig"
