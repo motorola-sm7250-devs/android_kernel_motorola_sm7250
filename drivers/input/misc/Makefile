@@ -90,5 +90,5 @@ obj-$(CONFIG_INPUT_IDEAPAD_SLIDEBAR)	+= ideapad_slidebar.o
 obj-$(CONFIG_INPUT_EGISTEC_FPS_MMI)	+= ets_fps_mmi/
 obj-$(CONFIG_INPUT_FPC_TEE_MMI)		+= fpc_fps_mmi/
 obj-$(CONFIG_INPUT_GOODIX_FOD_MMI)	+= goodix_fod_mmi/
-obj-$(CONFIG_INPUT_QPNP_POWER_ON_MMI)	+= qpnp_power_on_mmi/
+obj-$(CONFIG_INPUT_QPNP_POWER_ON_MMI)	+= qpnp-power-on-mmi.o
 obj-$(CONFIG_INPUT_STMVL53L1)		+= vl53L1/

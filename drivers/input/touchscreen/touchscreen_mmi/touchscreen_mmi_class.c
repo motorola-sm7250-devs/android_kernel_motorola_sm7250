@@ -123,9 +123,6 @@ TOUCH_MMI_GET_ATTR_RW(suppression, FMT_HEX_INTEGER);
 TOUCH_MMI_GET_ATTR_RW(hold_grip, FMT_HEX_INTEGER);
 TOUCH_MMI_GET_ATTR_RW(hold_distance, FMT_HEX_INTEGER);
 TOUCH_MMI_GET_ATTR_RW(gs_distance, FMT_HEX_INTEGER);
-#ifdef TS_MMI_TOUCH_MULTIWAY_UPDATE_FW
-TOUCH_MMI_GET_ATTR_RW(flash_mode, FMT_INTEGER);
-#endif
 #ifdef TS_MMI_TOUCH_GESTURE_POISON_EVENT
 TOUCH_MMI_GET_ATTR_RW(poison_timeout, FMT_HEX_INTEGER);
 TOUCH_MMI_GET_ATTR_RW(poison_distance, FMT_HEX_INTEGER);
@@ -136,41 +133,6 @@ TOUCH_MMI_GET_ATTR_WO(pinctrl);
 TOUCH_MMI_GET_ATTR_WO(refresh_rate);
 TOUCH_MMI_GET_ATTR_WO(charger_mode);
 TOUCH_MMI_GET_ATTR_WO(update_baseline);
-
-static char *ts_mmi_kobject_get_path(struct kobject *kobj, gfp_t gfp_mask)
-{
-	char *path;
-	int len = 1;
-	struct kobject *parent = kobj;
-
-	do {
-		if (parent->name == NULL) {
-			len = 0;
-			break;
-		}
-		len += strlen(parent->name) + 1;
-		parent = parent->parent;
-	} while (parent);
-
-	if (len == 0)
-		return NULL;
-
-	path = kzalloc(len, gfp_mask);
-	if (!path)
-		return NULL;
-
-	--len;
-	for (parent = kobj; parent; parent = parent->parent) {
-		int cur = strlen(parent->name);
-		len -= cur;
-		memcpy(path + len, parent->name, cur);
-		*(path + --len) = '/';
-	}
-	pr_debug("kobject: '%s' (%p): %s: path = '%s'\n", kobj->name,
-		kobj, __func__, path);
-
-	return path;
-}
 
 static ssize_t path_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
@@ -183,9 +145,7 @@ static ssize_t path_show(struct device *dev,
 		dev_err(dev, "touchscreen device pointer is NULL\n");
 		return (ssize_t)0;
 	}
-
-	path = ts_mmi_kobject_get_path(&DEV_MMI->kobj, GFP_KERNEL);
-
+	path = kobject_get_path(&DEV_MMI->kobj, GFP_KERNEL);
 	blen = scnprintf(buf, PAGE_SIZE, "%s", path ? path : "na");
 	kfree(path);
 	return blen;
@@ -327,120 +287,6 @@ static ssize_t pwr_store(struct device *dev,
 }
 static DEVICE_ATTR(pwr, (S_IWUSR | S_IWGRP), NULL, pwr_store);
 
-#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
-/*
- * gesture value used to indicate which gesture mode type is enabled
- */
-static ssize_t gesture_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-
-	return scnprintf(buf, PAGE_SIZE, "%02x\n", touch_cdev->pdata.supported_gesture_type);
-}
-static ssize_t gesture_store(struct device *dev,
-			struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-	unsigned int value = 0;
-	int err = 0;
-
-	mutex_lock(&touch_cdev->extif_mutex);
-	err = sscanf(buf, "%d", &value);
-	if (err < 0) {
-		dev_err(dev, "forcereflash: Failed to convert value\n");
-		mutex_unlock(&touch_cdev->extif_mutex);
-		return -EINVAL;
-	}
-	switch (value) {
-		case 0x10:
-			dev_info(dev, "%s: zero tap disable\n", __func__);
-			touch_cdev->gesture_mode_type &= 0xFE;
-			break;
-		case 0x11:
-			dev_info(dev, "%s: zero tap enable\n", __func__);
-			touch_cdev->gesture_mode_type |= 0x01;
-			break;
-		case 0x20:
-			dev_info(dev, "%s: single tap disable\n", __func__);
-			touch_cdev->gesture_mode_type &= 0xFD;
-			break;
-		case 0x21:
-			dev_info(dev, "%s: single tap enable\n", __func__);
-			touch_cdev->gesture_mode_type |= 0x02;
-			break;
-		case 0x30:
-			dev_info(dev, "%s: double tap disable\n", __func__);
-			touch_cdev->gesture_mode_type &= 0xFB;
-			break;
-		case 0x31:
-			dev_info(dev, "%s: double tap enable\n", __func__);
-			touch_cdev->gesture_mode_type |= 0x04;
-			break;
-		default:
-			dev_info(dev, "%s: unsupport gesture mode type\n", __func__);
-			;
-	}
-	mutex_unlock(&touch_cdev->extif_mutex);
-	dev_info(dev, "%s: gesture_mode_type = 0x%02x \n", __func__, touch_cdev->gesture_mode_type);
-
-	return size;
-}
-static DEVICE_ATTR(gesture, (S_IWUSR | S_IWGRP | S_IRUGO), gesture_show, gesture_store);
-#endif
-
-/*
- * Show liquid detection function status and detection result
- */
-static ssize_t liquid_detection_ctl_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-
-	return scnprintf(buf, PAGE_SIZE, "function status: %02x, detection result: %02x\n",
-		touch_cdev->lpd_state, touch_cdev->liquid_status);
-}
-
-/*
- * Enable/disable liquid detection function for debug
- */
-static ssize_t liquid_detection_ctl_store(struct device *dev,
-			struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-	unsigned int value = 0;
-	int err = 0;
-
-	err = sscanf(buf, "%d", &value);
-	if (err < 0) {
-		dev_err(dev, "liquid_detection_ctl: Failed to convert value\n");
-		return -EINVAL;
-	}
-
-	if (value == 2) {
-		dev_info(dev, "liquid_detection_ctl: Not support liquid detecion\n");
-		touch_cdev->pdata.support_liquid_detection = 0;
-		return size;
-	} else if (value == 3) {
-		dev_info(dev, "liquid_detection_ctl: Support liquid detecion\n");
-		touch_cdev->pdata.support_liquid_detection = 1;
-		return size;
-	}
-
-	mutex_lock(&touch_cdev->extif_mutex);
-	if (value != touch_cdev->lpd_state) {
-		touch_cdev->lpd_state = !!value;
-		kfifo_put(&touch_cdev->cmd_pipe, TS_MMI_DO_LIQUID_DETECTION);
-		schedule_delayed_work(&touch_cdev->work, 0);
-		dev_info(DEV_MMI, "%s: LPD state is %d\n", __func__, touch_cdev->lpd_state);
-	}
-	mutex_unlock(&touch_cdev->extif_mutex);
-
-	return size;
-}
-static DEVICE_ATTR(liquid_detection_ctl, (S_IWUSR | S_IWGRP | S_IRUGO),
-	liquid_detection_ctl_show, liquid_detection_ctl_store);
-
 static struct attribute *sysfs_class_attrs[] = {
 	&dev_attr_path.attr,
 	&dev_attr_vendor.attr,
@@ -457,9 +303,6 @@ static struct attribute *sysfs_class_attrs[] = {
 	&dev_attr_reset.attr,
 	&dev_attr_forcereflash.attr,
 	&dev_attr_doreflash.attr,
-#ifdef TS_MMI_TOUCH_MULTIWAY_UPDATE_FW
-	&dev_attr_flash_mode.attr,
-#endif
 	&dev_attr_pwr.attr,
 	&dev_attr_pinctrl.attr,
 	&dev_attr_refresh_rate.attr,
@@ -470,10 +313,6 @@ static struct attribute *sysfs_class_attrs[] = {
 	&dev_attr_poison_distance.attr,
 	&dev_attr_poison_trigger_distance.attr,
 #endif
-#ifdef CONFIG_BOARD_USES_DOUBLE_TAP_CTRL
-	&dev_attr_gesture.attr,
-#endif
-	&dev_attr_liquid_detection_ctl.attr,
 	NULL,
 };
 
@@ -485,6 +324,7 @@ static const struct attribute_group sysfs_class_group = {
  * pill_region input value is much different between others sys entry
  * override default functions
  */
+
 static ssize_t pill_region_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -545,89 +385,11 @@ static ssize_t pill_region_store(struct device *dev,
 }
 static DEVICE_ATTR(pill_region, (S_IWUSR | S_IWGRP | S_IRUGO), pill_region_show, pill_region_store);
 
-/*
- * active_region input requires 4 parameters
- */
-static ssize_t active_region_show(struct device *dev,
-	struct device_attribute *attr, char *buf)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-	int ret = 0;
-
-	if (!touch_cdev) {
-		dev_err(dev, "get_active_region: invalid pointer\n");
-		return (ssize_t)0;
-	}
-	mutex_lock(&touch_cdev->extif_mutex);
-	if (is_touch_active) {
-		TRY_TO_GET(active_region, &touch_cdev->active_region);
-		if (ret < 0) {
-			dev_err(dev, "get_active_region: return error %d\n", ret);
-			ret = 0;
-			goto ACTIVE_REGION_SHOW_OUT;
-		}
-	} else
-		dev_dbg(dev, "get_active_region: read from cache data.\n");
-
-	ret = scnprintf(buf, PAGE_SIZE, "%u %u %u %u",
-		touch_cdev->active_region[0], touch_cdev->active_region[1],
-		touch_cdev->active_region[2], touch_cdev->active_region[3]);
-ACTIVE_REGION_SHOW_OUT:
-	mutex_unlock(&touch_cdev->extif_mutex);
-
-	return (ssize_t)ret;
-
-}
-static ssize_t active_region_store(struct device *dev,
-			struct device_attribute *attr, const char *buf, size_t size)
-{
-	struct ts_mmi_dev *touch_cdev = dev_get_drvdata(dev);
-	unsigned int args[TS_MMI_ACTIVE_REGION_REQ_ARGS_NUM] = {0};
-	int ret = 0;
-	int i = TS_MMI_ACTIVE_REGION_REQ_ARGS_NUM;
-
-	ret = sscanf(buf, "%u %u %u %u", &args[0], &args[1], &args[2], &args[3]);
-	if (ret < TS_MMI_ACTIVE_REGION_REQ_ARGS_NUM) {
-		dev_err(dev, "active_region: Failed to convert value\n");
-		return -EINVAL;
-	}
-
-	if (!touch_cdev) {
-		dev_err(dev, "active_region: invalid pointer\n");
-		return -EINVAL;
-	}
-	mutex_lock(&touch_cdev->extif_mutex);
-	mutex_lock(&touch_cdev->method_mutex);
-	while (i--)
-		touch_cdev->active_region[i] = args[i];
-	if (is_touch_active)
-		_TRY_TO_CALL(active_region, touch_cdev->active_region);
-	else
-		dev_dbg(dev, "active_region: write to cache data.\n");
-	mutex_unlock(&touch_cdev->method_mutex);
-	mutex_unlock(&touch_cdev->extif_mutex);
-
-	return size;
-}
-static DEVICE_ATTR(active_region, (S_IWUSR | S_IWGRP | S_IRUGO), active_region_show, active_region_store);
-
 static int ts_mmi_sysfs_create_edge_entries(struct ts_mmi_dev *touch_cdev, bool create) {
 	int ret = 0;
 
 	if (create) {
 		/*initialize value*/
-		if (touch_cdev->pdata.active_region_ctrl) {
-			TRY_TO_GET(active_region, &touch_cdev->active_region);
-			if (ret < 0)
-				dev_err(DEV_TS, "%s: failed to read active_region info (%d)\n",
-						__func__, ret);
-			ret = sysfs_create_file(&DEV_MMI->kobj, &dev_attr_active_region.attr);
-			if (ret < 0) {
-				dev_err(DEV_TS, "%s: failed to create active_region entry (%d)\n",
-						__func__, ret);
-				goto CREATE_SUPPRESSION_FAILED;
-			}
-		}
 		if (touch_cdev->pdata.suppression_ctrl) {
 			TRY_TO_GET(suppression, &touch_cdev->suppression);
 			if (ret < 0)
@@ -753,40 +515,6 @@ static int get_class_fname_handler(struct device *parent, const char **pfname)
 	return 0;
 }
 
-static int get_supplier_handler(struct device *parent, const char **psname)
-{
-	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
-	if (!touch_cdev)
-		return -ENODEV;
-	*psname = touch_cdev->panel_supplier;
-	return 0;
-}
-
-static int get_gesture_type_handler(struct device *parent, unsigned char *gesture_type)
-{
-	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
-	if (!touch_cdev)
-		return -ENODEV;
-	*gesture_type = touch_cdev->gesture_mode_type;
-	return 0;
-}
-
-static int report_liquid_detection_status_handler(struct device *parent, int status)
-{
-	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
-	if (!touch_cdev)
-		return -ENODEV;
-
-	dev_info(DEV_TS, "%s: notify liquid detection status: %d\n", __func__, status);
-	touch_cdev->liquid_status = status;
-	if (touch_cdev->is_lpd_registered)
-		relay_notifier_fire(BLOCKING, LPD, NOTIFY_EVENT_TUD_STATUS,
-			(void *)&status);
-	else
-		dev_err(DEV_TS, "%s: lpd_notifier does not register\n", __func__);
-	return 0;
-}
-
 static int ts_mmi_default_pinctrl(struct device *parent, int on)
 {
 	struct ts_mmi_dev *touch_cdev = ts_mmi_dev_to_cdev(parent);
@@ -808,6 +536,40 @@ static int ts_mmi_default_pinctrl(struct device *parent, int on)
 
 	return 0;
 }
+
+#define BOOTMODE_MAX_LEN 64
+const char *mmi_bl_bootmode(void)
+{
+	const char *bootargs = NULL;
+	char *end = NULL;
+	char *idx = NULL;
+	struct device_node *np;
+	static char bootmode[BOOTMODE_MAX_LEN] = {'\0'};
+
+	if (bootmode[0] != '\0')
+		return bootmode;
+
+	np = of_find_node_by_path("/chosen");
+	if (np == NULL)
+		return NULL;
+
+	if (of_property_read_string(np, "bootargs", &bootargs) != 0)
+		goto putnode;
+
+	idx = strstr(bootargs, "androidboot.mode=");
+	if (idx) {
+		end = strpbrk(idx, " ");
+		idx = strpbrk(idx, "=");
+		if (idx && end > idx)
+			strlcpy(bootmode, idx + 1, end - idx);
+	}
+
+putnode:
+	of_node_put(np);
+	return bootmode;
+}
+
+EXPORT_SYMBOL(mmi_bl_bootmode);
 
 /**
  * ts_mmi_dev_register - register a new object of ts_mmi_dev class.
@@ -834,6 +596,14 @@ int ts_mmi_dev_register(struct device *parent,
 	touch_cdev->mdata = mdata;
 	mutex_init(&touch_cdev->extif_mutex);
 	mutex_init(&touch_cdev->method_mutex);
+
+#ifdef CONFIG_DRM_PANEL_NOTIFICATIONS
+	ret = ts_mmi_check_drm_panel(DEV_TS->of_node);
+	if (ret < 0) {
+		dev_err(DEV_TS, "%s: check drm panel failed. %d\n", __func__, ret);
+		touch_cdev->panel_status = -1;
+	}
+#endif
 
 	ret = ts_mmi_parse_dt(touch_cdev, DEV_TS->of_node);
 	if (ret < 0) {
@@ -883,9 +653,6 @@ int ts_mmi_dev_register(struct device *parent,
 		goto CLASS_DEVICE_CREATE_FAILED;
 	}
 	touch_cdev->mdata->exports.get_class_fname = get_class_fname_handler;
-	touch_cdev->mdata->exports.get_supplier = get_supplier_handler;
-	touch_cdev->mdata->exports.get_gesture_type = get_gesture_type_handler;
-	touch_cdev->mdata->exports.report_liquid_detection_status = report_liquid_detection_status_handler;
 	touch_cdev->mdata->exports.kobj_notify = &DEV_MMI->kobj;
 
 	down_write(&touchscreens_list_lock);
@@ -932,15 +699,6 @@ int ts_mmi_dev_register(struct device *parent,
 		ret = ts_mmi_gesture_init(touch_cdev);
 		if (ret < 0) {
 			dev_err(DEV_TS, "%s: Register gesture failed. %d\n",
-				__func__, ret);
-			goto GESTURE_INIT_FAILED;
-		}
-	}
-
-	if (touch_cdev->pdata.cli_gestures_enabled) {
-		ret = ts_mmi_cli_gesture_init(touch_cdev);
-		if (ret < 0) {
-			dev_err(DEV_TS, "%s: Register CLI gesture failed. %d\n",
 				__func__, ret);
 			goto GESTURE_INIT_FAILED;
 		}
@@ -1013,8 +771,6 @@ void ts_mmi_dev_unregister(struct device *parent)
 	}
 	if (touch_cdev->pdata.gestures_enabled)
 		ts_mmi_gesture_remove(touch_cdev);
-	if (touch_cdev->pdata.cli_gestures_enabled)
-		ts_mmi_cli_gesture_remove(touch_cdev);
 	if (touch_cdev->pdata.palm_enabled)
 		ts_mmi_palm_remove(touch_cdev);
 	ts_mmi_notifiers_unregister(touch_cdev);

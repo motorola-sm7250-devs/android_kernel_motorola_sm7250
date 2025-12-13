@@ -346,14 +346,7 @@ static int32_t nvt_fw_version_open(struct inode *inode, struct file *file)
 
 	return seq_open(file, &nvt_fw_version_seq_ops);
 }
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops nvt_fw_version_fops = {
-	.proc_open = nvt_fw_version_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-};
-#else
+
 static const struct file_operations nvt_fw_version_fops = {
 	.owner = THIS_MODULE,
 	.open = nvt_fw_version_open,
@@ -361,7 +354,6 @@ static const struct file_operations nvt_fw_version_fops = {
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -410,14 +402,6 @@ static int32_t nvt_baseline_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops nvt_baseline_fops = {
-	.proc_open = nvt_baseline_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-};
-#else
 static const struct file_operations nvt_baseline_fops = {
 	.owner = THIS_MODULE,
 	.open = nvt_baseline_open,
@@ -425,7 +409,6 @@ static const struct file_operations nvt_baseline_fops = {
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -477,14 +460,6 @@ static int32_t nvt_raw_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops nvt_raw_fops = {
-	.proc_open = nvt_raw_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-};
-#else
 static const struct file_operations nvt_raw_fops = {
 	.owner = THIS_MODULE,
 	.open = nvt_raw_open,
@@ -492,7 +467,6 @@ static const struct file_operations nvt_raw_fops = {
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 /*******************************************************
 Description:
@@ -544,14 +518,6 @@ static int32_t nvt_diff_open(struct inode *inode, struct file *file)
 	return seq_open(file, &nvt_seq_ops);
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops nvt_diff_fops = {
-	.proc_open = nvt_diff_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-};
-#else
 static const struct file_operations nvt_diff_fops = {
 	.owner = THIS_MODULE,
 	.open = nvt_diff_open,
@@ -559,7 +525,6 @@ static const struct file_operations nvt_diff_fops = {
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 
 /*******************************************************
@@ -637,45 +602,11 @@ kzalloc_failed:
 	return ret;
 }
 
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops nvt_fwupdate_fops = {
-	.proc_read = nvt_fwupdate_read,
-	.proc_write = NULL,
-};
-#else
 static const struct file_operations nvt_fwupdate_fops = {
 	.owner = THIS_MODULE,
 	.read = nvt_fwupdate_read,
 };
-#endif
 
-#ifdef EDGE_SUPPRESSION
-typedef enum{
-	 EDGE_REJECT=5,
-}CMD_OFFSET;
-
-static uint8_t nvt_cmd_show(int offset)
-{
-	uint8_t buf[3] = {0};
-	int32_t ret = 0;
-
-	//---set xdata index to EVENT BUF ADDR---
-	ret = nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
-	if (ret < 0) {
-		NVT_ERR("Set event buffer index fail!\n");
-		mutex_unlock(&ts->lock);
-		return ret;
-	}
-
-	//---read cmd status---
-	buf[0] = EVENT_MAP_HOST_CMD_CHECK;
-	buf[1] = 0xFF;
-	CTP_SPI_READ(ts->client, buf, 2);
-
-	return ((buf[1]>> offset) & 0x03);
-
-}
-#endif
 
 int32_t nvt_cmd_store(uint8_t u8Cmd)
 {
@@ -750,29 +681,6 @@ int nvt_palm_set(bool enabled) {
 }
 #endif
 
-#ifdef EDGE_SUPPRESSION
-int32_t nvt_edge_reject_set(uint32_t status) {
-	int ret = 0;
-
-	if(status == VERTICAL)// 0 180
-		ret = nvt_cmd_store(EDGE_REJECT_VERTICLE_CMD);
-	else if(status == LEFT_UP) //90
-		ret = nvt_cmd_store(EDGE_REJECT_LEFT_UP);
-	else if(status == RIGHT_UP) //270
-		ret = nvt_cmd_store(EDGE_REJECT_RIGHT_UP);
-	else {
-		NVT_ERR("Invalid parameter %d!\n", status);
-		ret = -1;
-	}
-
-	return ret;
-}
-
-uint8_t nvt_edge_reject_read(void) {
-	return nvt_cmd_show(EDGE_REJECT);
-}
-#endif
-
 static int nvt_monitor_control_show(struct seq_file *sfile, void *v)
 {
 	if(monitor_control_status == 1)
@@ -826,15 +734,6 @@ static int32_t nvt_monitor_control_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, nvt_monitor_control_show, NULL);
 }
-#if KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE
-static const struct proc_ops monitor_control_fops = {
-	.proc_open = nvt_monitor_control_open,
-	.proc_read = seq_read,
-	.proc_lseek = seq_lseek,
-	.proc_release = single_release,
-	.proc_write = nvt_monitor_control_store,
-};
-#else
 static const struct file_operations monitor_control_fops = {
 	.owner = THIS_MODULE,
 	.open = nvt_monitor_control_open,
@@ -843,7 +742,6 @@ static const struct file_operations monitor_control_fops = {
 	.llseek = seq_lseek,
 	.release = seq_release,
 };
-#endif
 
 
 /*******************************************************
