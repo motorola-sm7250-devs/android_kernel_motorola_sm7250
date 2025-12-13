@@ -34,7 +34,7 @@
 #include <linux/power_supply.h>
 #include <linux/sensors.h>
 #include "../../../include/linux/input/sx933x.h"	/* main struct, interrupt,init,pointers */
-#include "base.h"
+#include "../../base/base.h"
 
 #define LOG_TAG "[sar SX933x]: "
 
@@ -762,7 +762,8 @@ static void sx933x_reg_init(psx93XX_t this)
  */
 static int initialize(psx93XX_t this)
 {
-	int ret, retry;
+	int __maybe_unused ret;
+	int retry;
 	if (this)
 	{
 		LOG_INFO("SX933x income initialize\n");

@@ -1233,7 +1233,7 @@ static int aw8697_haptic_set_f0_preset(struct aw8697 *aw8697)
 
 static int aw8697_haptic_read_f0(struct aw8697 *aw8697)
 {
-	int ret = 0;
+	int __maybe_unused ret = 0;
 	unsigned char reg_val = 0;
 	unsigned int f0_reg = 0;
 	unsigned long f0_tmp = 0;
@@ -1257,7 +1257,7 @@ static int aw8697_haptic_read_f0(struct aw8697 *aw8697)
 
 static int aw8697_haptic_read_cont_f0(struct aw8697 *aw8697)
 {
-	int ret = 0;
+	int __maybe_unused ret = 0;
 	unsigned char reg_val = 0;
 	unsigned int f0_reg = 0;
 	unsigned long f0_tmp = 0;
@@ -1277,7 +1277,7 @@ static int aw8697_haptic_read_cont_f0(struct aw8697 *aw8697)
 
 static int aw8697_haptic_read_beme(struct aw8697 *aw8697)
 {
-	int ret = 0;
+	int __maybe_unused ret = 0;
 	unsigned char reg_val = 0;
 
 	ret = aw8697_i2c_read(aw8697, AW8697_REG_WAIT_VOL_MP, &reg_val);

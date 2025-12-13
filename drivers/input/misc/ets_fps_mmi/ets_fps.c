@@ -316,7 +316,7 @@ int Interrupt_Init(struct etspi_data *etspi, int int_mode, int detect_period, in
 {
 
 	int err = 0;
-	int status = 0;
+	int __maybe_unused status = 0;
 
 	fps_ints.detect_period = detect_period;
 	fps_ints.detect_threshold = detect_threshold;
