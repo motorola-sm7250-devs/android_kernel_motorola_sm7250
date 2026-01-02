@@ -476,6 +476,8 @@ void dsi_panel_calc_dsi_transfer_time(struct dsi_host_common_cfg *config,
 int dsi_panel_set_param(struct dsi_panel *panel,
 			struct msm_param_info *param_info);
 
+void dsi_panel_reset_param(struct dsi_panel *panel);
+
 int dsi_panel_get_elvss_data(struct dsi_panel *panel);
 int dsi_panel_get_elvss_data_1(struct dsi_panel *panel);
 int dsi_panel_set_elvss_dim_off(struct dsi_panel *panel, u8 val);
