@@ -1,6 +1,0 @@
-config INPUT_GOODIX_FOD_MMI
-	tristate "Goodix fingerprint sensor MMI"
-	default n
-	help
-	 Say Y here if you wish to include support for MMI Goodix finger print sensor.
-	 If unsure, say N.
