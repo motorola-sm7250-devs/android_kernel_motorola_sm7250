@@ -1,13 +1,10 @@
-ccflags-y += -I$(srctree)/techpack/camera/include
-ccflags-y += -I$(srctree)/techpack/camera/include/uapi
-ccflags-y += -I$(srctree)/techpack/camera/include/uapi/camera
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_utils
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_cpas/include
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_sensor_module/cam_sensor_io
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_sensor_module/cam_sensor_utils
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_sensor_module/cam_cci
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_req_mgr
-ccflags-y += -I$(srctree)/techpack/camera/drivers/cam_smmu
-ccflags-y += -I$(srctree)
+KERNEL_SRC ?= /lib/modules/$(shell uname -r)/build
 
-obj-m += cci_intf.o
+all:
+	$(MAKE) -C $(KERNEL_SRC) M=$(shell pwd) modules $(KBUILD_OPTIONS)
+
+modules_install:
+	$(MAKE) INSTALL_MOD_STRIP=1 -C $(KERNEL_SRC) M=$(shell pwd) modules_install
+
+clean:
+	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) clean

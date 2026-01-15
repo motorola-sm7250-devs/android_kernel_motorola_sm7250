@@ -12,4 +12,3 @@ obj-$(CONFIG_MSM_GLOBAL_SYNX) += synx/
 obj-$(CONFIG_TSPP) += broadcast/
 obj-$(CONFIG_DVB_MPQ) += dvb/
 obj-$(CONFIG_MSMB_CAMERA) += camera_v2/
-obj-y += camera/cam_sensor_module/cam_cci/
