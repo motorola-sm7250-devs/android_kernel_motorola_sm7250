@@ -1,64 +1,51 @@
-# add -Wall to try to catch everything we can.
-EXTRA_CFLAGS += -Wall
-EXTRA_CFLAGS += -I$(TOP)/motorola/kernel/modules/include \
-		-I$(TOP)/motorola/kernel/modules/drivers/input/touchscreen/focaltech_0flash_mmi \
-		-I$(TOP)/motorola/kernel/modules/drivers/input/touchscreen/focaltech_0flash_mmi/include \
-		-I$(TOP)/motorola/kernel/modules/drivers/input/touchscreen/focaltech_0flash_mmi/focaltech_test
+ccflags-y += -I$(src)/include
+ccflags-y += -I$(src)/focaltech_test
 
-obj-m := focaltech_0flash_mmi.o
-focaltech_0flash_mmi-objs += focaltech_core.o
-focaltech_0flash_mmi-objs += focaltech_esdcheck.o
-focaltech_0flash_mmi-objs += focaltech_ex_fun.o
-focaltech_0flash_mmi-objs += focaltech_ex_mode.o
-focaltech_0flash_mmi-objs += focaltech_flash.o
-focaltech_0flash_mmi-objs += focaltech_gesture.o
-focaltech_0flash_mmi-objs += focaltech_point_report_check.o
-focaltech_0flash_mmi-objs += focaltech_test/focaltech_test.o
-focaltech_0flash_mmi-objs += focaltech_test/focaltech_test_ini.o
+obj-$(CONFIG_TOUCHSCREEN_FTS_0FLASH_MMI) += focaltech_0flash_mmi.o
 
-ifneq ($(filter ft8719,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME)),)
-	EXTRA_CFLAGS += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8719
-	focaltech_0flash_mmi-objs += focaltech_test/supported_ic/focaltech_test_ft8719.o
-	focaltech_0flash_mmi-objs += focaltech_flash_ft8719.o
-	focaltech_0flash_mmi-objs += focaltech_spi_v1_1.o
-endif
-ifneq ($(filter ft8756,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME)),)
-	EXTRA_CFLAGS += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8756
-	focaltech_0flash_mmi-objs += focaltech_test/supported_ic/focaltech_test_ft8756.o
-	focaltech_0flash_mmi-objs += focaltech_flash_ft8756.o
-	focaltech_0flash_mmi-objs += focaltech_spi_v1_1_1.o
-endif
-ifneq ($(filter ft8006s_aa,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME)),)
-	EXTRA_CFLAGS += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8006S_AA
-	EXTRA_CFLAGS += -DFOCALTECH_ESD_EN
-ifneq (,$(filter %factory,$(TARGET_PRODUCT)))
-	EXTRA_CFLAGS += -DFOCALTECH_SUSPEND_IRQ_ENABLE
-endif
-	focaltech_0flash_mmi-objs += focaltech_test/supported_ic/focaltech_test_ft8006sp.o
-	focaltech_0flash_mmi-objs += focaltech_flash_ft8006s.o
-	focaltech_0flash_mmi-objs += focaltech_spi_v1_1_1.o
-endif
-ifneq ($(filter ft8009,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME)),)
-	EXTRA_CFLAGS += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8009
-	focaltech_0flash_mmi-objs += focaltech_test/supported_ic/focaltech_test_ft8756.o
-	focaltech_0flash_mmi-objs += focaltech_flash_ft8756.o
-	focaltech_0flash_mmi-objs += focaltech_spi_v1_1_1.o
-endif
-ifneq ($(filter m y,$(CONFIG_INPUT_TOUCHSCREEN_MMI)),)
-       EXTRA_CFLAGS += -DCONFIG_INPUT_TOUCHSCREEN_MMI
-       focaltech_0flash_mmi-objs += focaltech_ts_mmi.o
-endif
-ifneq ($(filter m y,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_ENABLE_DOUBLE_TAP)),)
-	EXTRA_CFLAGS += -DFOCALTECH_SENSOR_EN
-endif
-ifneq ($(filter m y,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_ENABLE_PALM)),)
-	EXTRA_CFLAGS += -DFOCALTECH_PALM_SENSOR_EN
-endif
-ifneq ($(filter m y,$(CONFIG_INPUT_FOCALTECH_0FLASH_MMI_PEN_NOTIFIER)),)
-	KBUILD_EXTRA_SYMBOLS += $(CURDIR)/$(KBUILD_EXTMOD)/../../../misc/pen/Module.symvers
-	EXTRA_CFLAGS += -DFOCALTECH_PEN_NOTIFIER
+focaltech_0flash_mmi-y += focaltech_core.o
+focaltech_0flash_mmi-y += focaltech_esdcheck.o
+focaltech_0flash_mmi-y += focaltech_ex_fun.o
+focaltech_0flash_mmi-y += focaltech_ex_mode.o
+focaltech_0flash_mmi-y += focaltech_flash.o
+focaltech_0flash_mmi-y += focaltech_gesture.o
+focaltech_0flash_mmi-y += focaltech_point_report_check.o
+focaltech_0flash_mmi-y += focaltech_test/focaltech_test.o
+focaltech_0flash_mmi-y += focaltech_test/focaltech_test_ini.o
+
+ifdef CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8719
+	ccflags-y += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8719
+	focaltech_0flash_mmi-y += focaltech_test/supported_ic/focaltech_test_ft8719.o
+	focaltech_0flash_mmi-y += focaltech_flash_ft8719.o
+	focaltech_0flash_mmi-y += focaltech_spi_v1_1.o
 endif
 
-ifneq ($(filter m y,$(CONFIG_INPUT_FOCALTECH_PANEL_NOTIFICATIONS)),)
-EXTRA_CFLAGS += -DFOCALTECH_CONFIG_PANEL_NOTIFICATIONS
+ifdef CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8756
+	ccflags-y += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8756
+	focaltech_0flash_mmi-y += focaltech_test/supported_ic/focaltech_test_ft8756.o
+	focaltech_0flash_mmi-y += focaltech_flash_ft8756.o
+	focaltech_0flash_mmi-y += focaltech_spi_v1_1_1.o
 endif
+
+ifdef CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8006S_AA
+	ccflags-y += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8006S_AA
+	ccflags-y += -DFOCALTECH_ESD_EN
+	focaltech_0flash_mmi-y += focaltech_test/supported_ic/focaltech_test_ft8006sp.o
+	focaltech_0flash_mmi-y += focaltech_flash_ft8006s.o
+	focaltech_0flash_mmi-y += focaltech_spi_v1_1_1.o
+endif
+
+ifdef CONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8009
+	ccflags-y += -DCONFIG_INPUT_FOCALTECH_0FLASH_MMI_IC_NAME_FT8009
+	focaltech_0flash_mmi-y += focaltech_test/supported_ic/focaltech_test_ft8756.o
+	focaltech_0flash_mmi-y += focaltech_flash_ft8756.o
+	focaltech_0flash_mmi-y += focaltech_spi_v1_1_1.o
+endif
+
+ccflags-$(CONFIG_INPUT_TOUCHSCREEN_MMI) += -DCONFIG_INPUT_TOUCHSCREEN_MMI
+focaltech_0flash_mmi-$(CONFIG_INPUT_TOUCHSCREEN_MMI) += focaltech_ts_mmi.o
+
+ccflags-$(CONFIG_TOUCHSCREEN_FTS_0FLASH_MMI_ENABLE_DOUBLE_TAP) += -DFOCALTECH_SENSOR_EN
+ccflags-$(CONFIG_TOUCHSCREEN_FTS_0FLASH_MMI_ENABLE_PALM) += -DFOCALTECH_PALM_SENSOR_EN
+ccflags-$(CONFIG_TOUCHSCREEN_FTS_0FLASH_MMI_PEN_NOTIFIER) += -DFOCALTECH_PEN_NOTIFIER
+ccflags-$(CONFIG_TOUCHSCREEN_FTS_0FLASH_MMI_ESD_ENABLE) += -DFOCALTECH_ESD_EN

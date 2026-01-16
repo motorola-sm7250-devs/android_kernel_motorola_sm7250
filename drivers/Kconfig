@@ -246,4 +246,15 @@ source "drivers/tzlog_dump/Kconfig"
 source "drivers/watchdog_cpu_ctx/Kconfig"
 
 source "drivers/watchdogtest/Kconfig"
+
+source "drivers/gud/Kconfig"
+
+source "drivers/fm/Kconfig"
+
+source "drivers/misc/mmi_sigprint/Kconfig"
+
+source "drivers/regulator/slg5bm43670/Kconfig"
+
+source "drivers/power/bq27426_fg_mmi/Kconfig"
+
 endmenu
